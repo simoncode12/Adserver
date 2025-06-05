@@ -1,5 +1,6 @@
 <?php
 $pageTitle = 'Dashboard';
+$breadcrumb = []; // No breadcrumb for main dashboard
 
 // Error handling and debugging
 ini_set('display_errors', 1);
@@ -14,8 +15,6 @@ try {
     require_once '../includes/helpers.php';
 
     $auth = new Auth();
-    $auth->requireAuth(USER_TYPE_ADMIN);
-
     $db = Database::getInstance();
 
     // Get basic statistics with error handling
@@ -88,6 +87,23 @@ try {
     }
 
     try {
+        // Monthly stats
+        $result = $db->fetch(
+            "SELECT 
+                COUNT(CASE WHEN event_type = 'impression' THEN 1 END) as impressions,
+                COUNT(CASE WHEN event_type = 'click' THEN 1 END) as clicks,
+                COALESCE(SUM(revenue), 0) as revenue,
+                COALESCE(SUM(cost), 0) as cost
+             FROM tracking_events 
+             WHERE DATE(created_at) >= ?",
+            [$thisMonth]
+        );
+        if ($result) $monthlyStats = $result;
+    } catch (Exception $e) {
+        error_log("Monthly stats error: " . $e->getMessage());
+    }
+
+    try {
         // Active entities count
         $result = $db->fetch(
             "SELECT 
@@ -101,6 +117,73 @@ try {
         if ($result) $activeCounts = $result;
     } catch (Exception $e) {
         error_log("Active counts error: " . $e->getMessage());
+    }
+
+    // Recent activities
+    $recentActivities = [];
+    try {
+        $recentActivities = $db->fetchAll(
+            "SELECT al.*, u.username 
+             FROM activity_logs al
+             LEFT JOIN users u ON al.user_id = u.id
+             ORDER BY al.created_at DESC 
+             LIMIT 10"
+        );
+    } catch (Exception $e) {
+        error_log("Recent activities error: " . $e->getMessage());
+    }
+
+    // Top performing zones
+    $topZones = [];
+    try {
+        $topZones = $db->fetchAll(
+            "SELECT z.name, s.name as site_name, 
+                    COUNT(te.id) as impressions,
+                    SUM(te.revenue) as revenue
+             FROM zones z
+             JOIN sites s ON z.site_id = s.id
+             LEFT JOIN tracking_events te ON z.id = te.zone_id AND DATE(te.created_at) = ?
+             GROUP BY z.id
+             ORDER BY revenue DESC
+             LIMIT 5",
+            [$today]
+        );
+    } catch (Exception $e) {
+        error_log("Top zones error: " . $e->getMessage());
+    }
+
+    // RTB performance
+    $rtbStats = ['total_requests' => 0, 'successful_requests' => 0, 'avg_response_time' => 0];
+    try {
+        $result = $db->fetch(
+            "SELECT 
+                COUNT(*) as total_requests,
+                COUNT(CASE WHEN status = 'success' THEN 1 END) as successful_requests,
+                AVG(response_time) as avg_response_time
+             FROM rtb_logs 
+             WHERE DATE(created_at) = ?",
+            [$today]
+        );
+        if ($result) $rtbStats = $result;
+    } catch (Exception $e) {
+        error_log("RTB stats error: " . $e->getMessage());
+    }
+
+    // Fraud detection stats
+    $fraudStats = ['total_events' => 0, 'bot_events' => 0, 'proxy_events' => 0];
+    try {
+        $result = $db->fetch(
+            "SELECT 
+                COUNT(*) as total_events,
+                COUNT(CASE WHEN fraud_type = 'bot' THEN 1 END) as bot_events,
+                COUNT(CASE WHEN fraud_type = 'proxy' THEN 1 END) as proxy_events
+             FROM fraud_events 
+             WHERE DATE(created_at) = ?",
+            [$today]
+        );
+        if ($result) $fraudStats = $result;
+    } catch (Exception $e) {
+        error_log("Fraud stats error: " . $e->getMessage());
     }
 
     // Calculate metrics
@@ -128,292 +211,349 @@ try {
     </div>
     ");
 }
+
+include 'templates/header.php';
 ?>
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?php echo $pageTitle; ?> - AdStart AdServer</title>
-    
-    <!-- Bootstrap CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Font Awesome -->
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <!-- Chart.js -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    
-    <style>
-        .sidebar {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            box-shadow: 2px 0 10px rgba(0,0,0,0.1);
-        }
-        .sidebar .nav-link {
-            color: rgba(255,255,255,0.8);
-            padding: 12px 20px;
-            border-radius: 8px;
-            margin: 2px 10px;
-            transition: all 0.3s ease;
-        }
-        .sidebar .nav-link:hover,
-        .sidebar .nav-link.active {
-            background: rgba(255,255,255,0.1);
-            color: white;
-            transform: translateX(5px);
-        }
-        .main-content {
-            background: #f8f9fa;
-            min-height: 100vh;
-        }
-        .card {
-            border: none;
-            border-radius: 15px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
-            transition: transform 0.3s ease;
-        }
-        .card:hover {
-            transform: translateY(-5px);
-        }
-        .stats-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-        .stats-card-success {
-            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-        }
-        .stats-card-warning {
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        }
-        .stats-card-info {
-            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-        }
-    </style>
-</head>
-<body>
-    <div class="container-fluid">
-        <div class="row">
-            <!-- Sidebar -->
-            <div class="col-md-2 px-0">
-                <div class="sidebar">
-                    <div class="p-3 text-center">
-                        <h4 class="text-white mb-0">
-                            <i class="fas fa-ad text-warning"></i>
-                            AdStart
-                        </h4>
-                        <small class="text-white-50">Admin Panel</small>
+<div id="alerts-container"></div>
+
+<!-- Real-time Stats Cards -->
+<div id="live-stats">
+    <div class="row mb-4">
+        <div class="col-lg-3 col-md-6 mb-4">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-grow-1">
+                            <h3 class="mb-1"><?php echo number_format($todayStats['impressions'] ?? 0); ?></h3>
+                            <p class="mb-0">Today's Impressions</p>
+                            <small class="d-block mt-1">
+                                <?php if ($impressionChange > 0): ?>
+                                    <i class="fas fa-arrow-up"></i> +<?php echo number_format($impressionChange, 1); ?>%
+                                <?php elseif ($impressionChange < 0): ?>
+                                    <i class="fas fa-arrow-down"></i> <?php echo number_format($impressionChange, 1); ?>%
+                                <?php else: ?>
+                                    <i class="fas fa-minus"></i> 0%
+                                <?php endif; ?>
+                                vs yesterday
+                            </small>
+                        </div>
+                        <div class="ms-3">
+                            <i class="fas fa-eye fa-2x opacity-75"></i>
+                        </div>
                     </div>
-                    
-                    <nav class="nav flex-column">
-                        <a class="nav-link active" href="index.php">
-                            <i class="fas fa-tachometer-alt me-2"></i>Dashboard
-                        </a>
-                        <a class="nav-link" href="users.php">
-                            <i class="fas fa-users me-2"></i>Users
-                        </a>
-                        <a class="nav-link" href="sites.php">
-                            <i class="fas fa-globe me-2"></i>Sites
-                        </a>
-                        <a class="nav-link" href="campaigns.php">
-                            <i class="fas fa-bullhorn me-2"></i>Campaigns
-                        </a>
-                        <a class="nav-link" href="statistics.php">
-                            <i class="fas fa-chart-bar me-2"></i>Statistics
-                        </a>
-                        <a class="nav-link" href="settings.php">
-                            <i class="fas fa-cogs me-2"></i>Settings
-                        </a>
-                        
-                        <hr class="text-white-50 mx-3">
-                        
-                        <a class="nav-link" href="logout.php">
-                            <i class="fas fa-sign-out-alt me-2"></i>Logout
-                        </a>
-                    </nav>
                 </div>
             </div>
-            
-            <!-- Main Content -->
-            <div class="col-md-10 px-0">
-                <div class="main-content">
-                    <!-- Top Navigation -->
-                    <nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm">
-                        <div class="container-fluid">
-                            <div class="d-flex align-items-center">
-                                <h5 class="mb-0"><?php echo $pageTitle; ?></h5>
-                            </div>
-                            
-                            <div class="d-flex align-items-center">
-                                <div class="dropdown">
-                                    <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown">
-                                        <i class="fas fa-user-circle"></i>
-                                        <?php echo $_SESSION['username'] ?? 'Admin'; ?>
-                                    </button>
-                                    <ul class="dropdown-menu">
-                                        <li><a class="dropdown-item" href="settings.php"><i class="fas fa-cog me-2"></i>Settings</a></li>
-                                        <li><hr class="dropdown-divider"></li>
-                                        <li><a class="dropdown-item" href="logout.php"><i class="fas fa-sign-out-alt me-2"></i>Logout</a></li>
-                                    </ul>
-                                </div>
-                            </div>
+        </div>
+        
+        <div class="col-lg-3 col-md-6 mb-4">
+            <div class="card stats-card-success">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-grow-1">
+                            <h3 class="mb-1"><?php echo number_format($todayStats['clicks'] ?? 0); ?></h3>
+                            <p class="mb-0">Today's Clicks</p>
+                            <small class="d-block mt-1">
+                                CTR: <?php echo number_format($ctr, 2); ?>%
+                            </small>
                         </div>
-                    </nav>
-                    
-                    <!-- Page Content -->
-                    <div class="p-4">
-                        <!-- Real-time Stats Cards -->
-                        <div class="row mb-4">
-                            <div class="col-md-3">
-                                <div class="card stats-card">
-                                    <div class="card-body text-center">
-                                        <i class="fas fa-eye fa-2x mb-2"></i>
-                                        <h4><?php echo number_format($todayStats['impressions'] ?? 0); ?></h4>
-                                        <p class="mb-1">Today's Impressions</p>
-                                        <small>
-                                            <?php if ($impressionChange > 0): ?>
-                                                <i class="fas fa-arrow-up"></i> +<?php echo number_format($impressionChange, 1); ?>%
-                                            <?php elseif ($impressionChange < 0): ?>
-                                                <i class="fas fa-arrow-down"></i> <?php echo number_format($impressionChange, 1); ?>%
-                                            <?php else: ?>
-                                                <i class="fas fa-minus"></i> 0%
-                                            <?php endif; ?>
-                                            vs yesterday
-                                        </small>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="col-md-3">
-                                <div class="card stats-card-success">
-                                    <div class="card-body text-center">
-                                        <i class="fas fa-mouse-pointer fa-2x mb-2"></i>
-                                        <h4><?php echo number_format($todayStats['clicks'] ?? 0); ?></h4>
-                                        <p class="mb-1">Today's Clicks</p>
-                                        <small>
-                                            CTR: <?php echo number_format($ctr, 2); ?>%
-                                        </small>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="col-md-3">
-                                <div class="card stats-card-warning">
-                                    <div class="card-body text-center">
-                                        <i class="fas fa-dollar-sign fa-2x mb-2"></i>
-                                        <h4>$<?php echo number_format($todayStats['revenue'] ?? 0, 2); ?></h4>
-                                        <p class="mb-1">Today's Revenue</p>
-                                        <small>
-                                            <?php if ($revenueChange > 0): ?>
-                                                <i class="fas fa-arrow-up"></i> +<?php echo number_format($revenueChange, 1); ?>%
-                                            <?php elseif ($revenueChange < 0): ?>
-                                                <i class="fas fa-arrow-down"></i> <?php echo number_format($revenueChange, 1); ?>%
-                                            <?php else: ?>
-                                                <i class="fas fa-minus"></i> 0%
-                                            <?php endif; ?>
-                                            vs yesterday
-                                        </small>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <div class="col-md-3">
-                                <div class="card stats-card-info">
-                                    <div class="card-body text-center">
-                                        <i class="fas fa-chart-line fa-2x mb-2"></i>
-                                        <h4><?php echo number_format($todayStats['conversions'] ?? 0); ?></h4>
-                                        <p class="mb-1">Today's Conversions</p>
-                                        <small>
-                                            RPM: $<?php 
-                                            $rpm = $todayStats['impressions'] > 0 ? ($todayStats['revenue'] / $todayStats['impressions']) * 1000 : 0;
-                                            echo number_format($rpm, 2); 
-                                            ?>
-                                        </small>
-                                    </div>
-                                </div>
-                            </div>
+                        <div class="ms-3">
+                            <i class="fas fa-mouse-pointer fa-2x opacity-75"></i>
                         </div>
-
-                        <!-- System Overview -->
-                        <div class="row mb-4">
-                            <div class="col-md-12">
-                                <div class="card">
-                                    <div class="card-header">
-                                        <h5 class="mb-0"><i class="fas fa-server me-2"></i>System Overview</h5>
-                                    </div>
-                                    <div class="card-body">
-                                        <div class="row text-center">
-                                            <div class="col-md-2">
-                                                <h4 class="text-primary"><?php echo $activeCounts['active_publishers']; ?></h4>
-                                                <small>Active Publishers</small>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <h4 class="text-success"><?php echo $activeCounts['active_advertisers']; ?></h4>
-                                                <small>Active Advertisers</small>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <h4 class="text-info"><?php echo $activeCounts['active_sites']; ?></h4>
-                                                <small>Active Sites</small>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <h4 class="text-warning"><?php echo $activeCounts['active_zones']; ?></h4>
-                                                <small>Active Zones</small>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <h4 class="text-danger"><?php echo $activeCounts['active_campaigns']; ?></h4>
-                                                <small>Active Campaigns</small>
-                                            </div>
-                                            <div class="col-md-2">
-                                                <h4 class="text-dark"><?php echo $activeCounts['active_rtb_endpoints']; ?></h4>
-                                                <small>RTB Endpoints</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-lg-3 col-md-6 mb-4">
+            <div class="card stats-card-warning">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-grow-1">
+                            <h3 class="mb-1">$<?php echo number_format($todayStats['revenue'] ?? 0, 2); ?></h3>
+                            <p class="mb-0">Today's Revenue</p>
+                            <small class="d-block mt-1">
+                                <?php if ($revenueChange > 0): ?>
+                                    <i class="fas fa-arrow-up"></i> +<?php echo number_format($revenueChange, 1); ?>%
+                                <?php elseif ($revenueChange < 0): ?>
+                                    <i class="fas fa-arrow-down"></i> <?php echo number_format($revenueChange, 1); ?>%
+                                <?php else: ?>
+                                    <i class="fas fa-minus"></i> 0%
+                                <?php endif; ?>
+                                vs yesterday
+                            </small>
                         </div>
-
-                        <!-- Quick Actions -->
-                        <div class="row">
-                            <div class="col-md-12">
-                                <div class="card">
-                                    <div class="card-header">
-                                        <h5 class="mb-0"><i class="fas fa-bolt me-2"></i>Quick Actions</h5>
-                                    </div>
-                                    <div class="card-body">
-                                        <div class="row">
-                                            <div class="col-md-3">
-                                                <a href="users.php" class="btn btn-outline-primary w-100 mb-2">
-                                                    <i class="fas fa-users me-2"></i>Manage Users
-                                                </a>
-                                            </div>
-                                            <div class="col-md-3">
-                                                <a href="sites.php" class="btn btn-outline-success w-100 mb-2">
-                                                    <i class="fas fa-globe me-2"></i>Review Sites
-                                                </a>
-                                            </div>
-                                            <div class="col-md-3">
-                                                <a href="campaigns.php" class="btn btn-outline-warning w-100 mb-2">
-                                                    <i class="fas fa-bullhorn me-2"></i>View Campaigns
-                                                </a>
-                                            </div>
-                                            <div class="col-md-3">
-                                                <a href="statistics.php" class="btn btn-outline-info w-100 mb-2">
-                                                    <i class="fas fa-chart-bar me-2"></i>View Statistics
-                                                </a>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
+                        <div class="ms-3">
+                            <i class="fas fa-dollar-sign fa-2x opacity-75"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-lg-3 col-md-6 mb-4">
+            <div class="card stats-card-info">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="flex-grow-1">
+                            <h3 class="mb-1"><?php echo number_format($todayStats['conversions'] ?? 0); ?></h3>
+                            <p class="mb-0">Today's Conversions</p>
+                            <small class="d-block mt-1">
+                                RPM: $<?php 
+                                $rpm = $todayStats['impressions'] > 0 ? ($todayStats['revenue'] / $todayStats['impressions']) * 1000 : 0;
+                                echo number_format($rpm, 2); 
+                                ?>
+                            </small>
+                        </div>
+                        <div class="ms-3">
+                            <i class="fas fa-chart-line fa-2x opacity-75"></i>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
+</div>
 
-    <!-- Bootstrap JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
+<!-- System Overview -->
+<div class="row mb-4">
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="fas fa-server me-2"></i>System Overview</h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-4">
+                        <h4 class="text-primary mb-1"><?php echo $activeCounts['active_publishers'] ?? 0; ?></h4>
+                        <small class="text-muted">Active Publishers</small>
+                    </div>
+                    <div class="col-4">
+                        <h4 class="text-success mb-1"><?php echo $activeCounts['active_advertisers'] ?? 0; ?></h4>
+                        <small class="text-muted">Active Advertisers</small>
+                    </div>
+                    <div class="col-4">
+                        <h4 class="text-info mb-1"><?php echo $activeCounts['active_sites'] ?? 0; ?></h4>
+                        <small class="text-muted">Active Sites</small>
+                    </div>
+                </div>
+                <hr class="my-3">
+                <div class="row text-center">
+                    <div class="col-4">
+                        <h4 class="text-warning mb-1"><?php echo $activeCounts['active_zones'] ?? 0; ?></h4>
+                        <small class="text-muted">Active Zones</small>
+                    </div>
+                    <div class="col-4">
+                        <h4 class="text-danger mb-1"><?php echo $activeCounts['active_campaigns'] ?? 0; ?></h4>
+                        <small class="text-muted">Active Campaigns</small>
+                    </div>
+                    <div class="col-4">
+                        <h4 class="text-dark mb-1"><?php echo $activeCounts['active_rtb_endpoints'] ?? 0; ?></h4>
+                        <small class="text-muted">RTB Endpoints</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="fas fa-shield-alt me-2"></i>Security & Performance</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span>RTB Success Rate</span>
+                        <span class="fw-bold">
+                            <?php 
+                            $successRate = $rtbStats['total_requests'] > 0 
+                                ? ($rtbStats['successful_requests'] / $rtbStats['total_requests']) * 100 
+                                : 0;
+                            echo number_format($successRate, 1) . '%';
+                            ?>
+                        </span>
+                    </div>
+                    <div class="progress" style="height: 8px;">
+                        <div class="progress-bar bg-success" style="width: <?php echo $successRate; ?>%"></div>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between">
+                        <span>Avg RTB Response Time</span>
+                        <span class="fw-bold"><?php echo number_format($rtbStats['avg_response_time'] ?? 0, 0); ?>ms</span>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between">
+                        <span>Fraud Events Today</span>
+                        <span class="fw-bold text-danger"><?php echo number_format($fraudStats['total_events'] ?? 0); ?></span>
+                    </div>
+                </div>
+                
+                <div class="row text-center">
+                    <div class="col-6">
+                        <small class="text-muted">Bot Blocks: <?php echo $fraudStats['bot_events'] ?? 0; ?></small>
+                    </div>
+                    <div class="col-6">
+                        <small class="text-muted">Proxy Blocks: <?php echo $fraudStats['proxy_events'] ?? 0; ?></small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Charts Row -->
+<div class="row mb-4">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="fas fa-chart-area me-2"></i>Revenue Trend (Last 7 Days)</h5>
+            </div>
+            <div class="card-body">
+                <canvas id="revenueChart" height="100"></canvas>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="fas fa-trophy me-2"></i>Top Zones Today</h5>
+            </div>
+            <div class="card-body">
+                <?php if (!empty($topZones)): ?>
+                    <?php foreach ($topZones as $zone): ?>
+                        <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
+                            <div>
+                                <div class="fw-bold"><?php echo htmlspecialchars($zone['name']); ?></div>
+                                <small class="text-muted"><?php echo htmlspecialchars($zone['site_name']); ?></small>
+                            </div>
+                            <div class="text-end">
+                                <div class="fw-bold text-success">$<?php echo number_format($zone['revenue'] ?? 0, 2); ?></div>
+                                <small class="text-muted"><?php echo number_format($zone['impressions'] ?? 0); ?> imp</small>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                <?php else: ?>
+                    <div class="text-center text-muted py-4">
+                        <i class="fas fa-chart-bar fa-2x mb-2 opacity-50"></i>
+                        <p class="mb-0">No data available</p>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Recent Activities -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="fas fa-history me-2"></i>Recent Activities</h5>
+                <a href="activity_logs.php" class="btn btn-sm btn-outline-primary">View All</a>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>User</th>
+                                <th>Action</th>
+                                <th>IP Address</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (!empty($recentActivities)): ?>
+                                <?php foreach ($recentActivities as $activity): ?>
+                                    <tr>
+                                        <td>
+                                            <small><?php echo date('H:i:s', strtotime($activity['created_at'])); ?></small>
+                                        </td>
+                                        <td>
+                                            <span class="fw-bold"><?php echo htmlspecialchars($activity['username'] ?? 'System'); ?></span>
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-primary"><?php echo htmlspecialchars($activity['action']); ?></span>
+                                        </td>
+                                        <td><small class="text-muted"><?php echo htmlspecialchars($activity['ip_address']); ?></small></td>
+                                        <td><small class="text-muted"><?php echo htmlspecialchars($activity['details'] ?? '-'); ?></small></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php else: ?>
+                                <tr>
+                                    <td colspan="5" class="text-center text-muted py-4">No recent activities</td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Revenue Chart
+const ctx = document.getElementById('revenueChart').getContext('2d');
+const revenueChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+        labels: <?php
+            $dates = [];
+            $revenues = [];
+            for ($i = 6; $i >= 0; $i--) {
+                $date = date('Y-m-d', strtotime("-{$i} days"));
+                $dates[] = date('M j', strtotime($date));
+                
+                try {
+                    $dailyRevenue = $db->fetch(
+                        "SELECT SUM(revenue) as revenue FROM tracking_events WHERE DATE(created_at) = ?",
+                        [$date]
+                    );
+                    $revenues[] = floatval($dailyRevenue['revenue'] ?? 0);
+                } catch (Exception $e) {
+                    $revenues[] = 0;
+                }
+            }
+            echo json_encode($dates);
+        ?>,
+        datasets: [{
+            label: 'Revenue ($)',
+            data: <?php echo json_encode($revenues); ?>,
+            borderColor: '#667eea',
+            backgroundColor: 'rgba(102, 126, 234, 0.1)',
+            tension: 0.4,
+            fill: true,
+            borderWidth: 3
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: {
+                display: false
+            }
+        },
+        scales: {
+            y: {
+                beginAtZero: true,
+                ticks: {
+                    callback: function(value) {
+                        return '$' + value.toFixed(2);
+                    }
+                }
+            }
+        }
+    }
+});
+</script>
+
+<?php include 'templates/footer.php'; ?>
