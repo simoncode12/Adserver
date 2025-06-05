@@ -4,6 +4,9 @@
  * AdServer Platform Main Configuration
  */
 
+// Include PHP runtime settings first
+require_once __DIR__ . '/php_settings.php';
+
 // Define application constants
 define('APP_NAME', 'AdStart AdServer');
 define('APP_VERSION', '1.0.0');
@@ -55,21 +58,6 @@ define('COMMISSION_RATE', 0.10); // 10%
 
 // Timezone
 date_default_timezone_set('UTC');
-
-// Error reporting
-if (DEBUG_MODE) {
-    error_reporting(E_ALL);
-    ini_set('display_errors', 1);
-} else {
-    error_reporting(0);
-    ini_set('display_errors', 0);
-}
-
-// Session configuration
-ini_set('session.cookie_httponly', 1);
-ini_set('session.cookie_secure', 1);
-ini_set('session.use_strict_mode', 1);
-ini_set('session.gc_maxlifetime', SESSION_LIFETIME);
 
 // Start session if not already started
 if (session_status() === PHP_SESSION_NONE) {
