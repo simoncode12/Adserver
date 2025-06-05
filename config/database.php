@@ -1,12 +1,12 @@
 <?php
 /**
- * Database Configuration
+ * Database Configuration (Fixed)
  * AdServer Platform Database Connection
  */
 
 define('DB_HOST', 'localhost');
 define('DB_USER', 'user_ad');
-define('DB_PASS', 'Pasword123');
+define('DB_PASS', 'Puputchen12$');
 define('DB_NAME', 'user_ad');
 define('DB_CHARSET', 'utf8mb4');
 
@@ -71,6 +71,9 @@ class Database {
         return $this->query($sql, $params);
     }
     
+    /**
+     * Update method (FIXED) - ensures consistent parameter binding
+     */
     public function update($table, $data, $where, $whereParams = []) {
         $fields = [];
         foreach (array_keys($data) as $field) {
@@ -84,7 +87,22 @@ class Database {
             $params[':' . $key] = $value;
         }
         
-        $params = array_merge($params, $whereParams);
+        // Handle WHERE parameters - convert positional to named if needed
+        if (!empty($whereParams)) {
+            if (is_array($whereParams) && isset($whereParams[0])) {
+                // Positional parameters - convert WHERE clause to use named parameters
+                $whereParamCount = count($whereParams);
+                $namedWhere = $where;
+                for ($i = 0; $i < $whereParamCount; $i++) {
+                    $namedWhere = preg_replace('/\?/', ':where_param_' . $i, $namedWhere, 1);
+                    $params[':where_param_' . $i] = $whereParams[$i];
+                }
+                $sql = "UPDATE {$table} SET " . implode(', ', $fields) . " WHERE {$namedWhere}";
+            } else {
+                // Named parameters
+                $params = array_merge($params, $whereParams);
+            }
+        }
         
         return $this->query($sql, $params);
     }
