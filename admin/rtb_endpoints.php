@@ -25,10 +25,9 @@ try {
                     COUNT(CASE WHEN status = 'active' THEN 1 END) as active_endpoints,
                     COUNT(CASE WHEN status = 'inactive' THEN 1 END) as inactive_endpoints,
                     COUNT(CASE WHEN status = 'testing' THEN 1 END) as testing_endpoints,
-                    (SELECT COUNT(*) FROM rtb_requests WHERE DATE(created_at) = CURDATE()) as total_requests_today,
-                    (SELECT COUNT(*) FROM rtb_requests WHERE response_status = 200 AND DATE(created_at) = CURDATE()) as successful_requests_today,
-                    (SELECT COALESCE(AVG(response_time), 0) FROM rtb_requests WHERE DATE(created_at) = CURDATE()) as avg_response_time_today,
-                    (SELECT COALESCE(SUM(bid_amount), 0) FROM rtb_requests WHERE won = 1 AND DATE(created_at) = CURDATE()) as total_bid_amount_today
+                    COALESCE(AVG(success_rate), 0) as avg_success_rate,
+                    COALESCE(AVG(avg_response_time), 0) as avg_response_time_today,
+                    COUNT(CASE WHEN last_request >= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN 1 END) as active_today
                  FROM rtb_endpoints"
             );
             
@@ -55,29 +54,57 @@ try {
                 case 'create':
                     try {
                         // Validate URL
-                        $endpoint_url = sanitize($_POST['endpoint_url']);
-                        if (!filter_var($endpoint_url, FILTER_VALIDATE_URL)) {
+                        $url = sanitize($_POST['url']);
+                        if (!filter_var($url, FILTER_VALIDATE_URL)) {
                             throw new Exception('Invalid endpoint URL');
                         }
                         
+                        // Prepare JSON fields
+                        $auth_credentials = null;
+                        if ($_POST['auth_type'] !== 'none' && !empty($_POST['auth_token'])) {
+                            $auth_credentials = json_encode([
+                                'token' => sanitize($_POST['auth_token']),
+                                'type' => sanitize($_POST['auth_type'])
+                            ]);
+                        }
+                        
+                        $supported_formats = !empty($_POST['supported_formats']) 
+                            ? json_encode(array_map('trim', explode(',', $_POST['supported_formats'])))
+                            : json_encode(['banner']);
+                            
+                        $supported_sizes = !empty($_POST['supported_sizes']) 
+                            ? json_encode(array_map('trim', explode(',', $_POST['supported_sizes'])))
+                            : null;
+                            
+                        $country_targeting = !empty($_POST['country_targeting']) 
+                            ? json_encode(array_map('trim', explode(',', $_POST['country_targeting'])))
+                            : null;
+                            
+                        $settings = json_encode([
+                            'description' => sanitize($_POST['description'] ?? ''),
+                            'priority' => (int)($_POST['priority'] ?? 3),
+                            'test_mode' => isset($_POST['test_mode']) ? 1 : 0
+                        ]);
+                        
                         $data = [
                             'name' => sanitize($_POST['name']),
-                            'description' => sanitize($_POST['description']),
-                            'endpoint_url' => $endpoint_url,
-                            'bid_floor' => (float)$_POST['bid_floor'],
-                            'timeout' => (int)$_POST['timeout'],
+                            'endpoint_type' => sanitize($_POST['endpoint_type']),
+                            'url' => $url,
+                            'method' => sanitize($_POST['method']) ?: 'POST',
+                            'protocol_version' => sanitize($_POST['protocol_version']) ?: '2.5',
+                            'status' => 'inactive',
+                            'timeout_ms' => (int)$_POST['timeout_ms'],
                             'qps_limit' => (int)$_POST['qps_limit'],
                             'auth_type' => sanitize($_POST['auth_type']),
-                            'auth_token' => sanitize($_POST['auth_token']),
-                            'user_agent' => sanitize($_POST['user_agent']),
-                            'priority' => (int)$_POST['priority'],
-                            'geo_targeting' => sanitize($_POST['geo_targeting']),
-                            'device_targeting' => sanitize($_POST['device_targeting']),
-                            'format_support' => sanitize($_POST['format_support']),
-                            'test_mode' => isset($_POST['test_mode']) ? 1 : 0,
-                            'status' => 'inactive',
+                            'auth_credentials' => $auth_credentials,
+                            'bid_floor' => (float)$_POST['bid_floor'],
+                            'supported_formats' => $supported_formats,
+                            'supported_sizes' => $supported_sizes,
+                            'country_targeting' => $country_targeting,
+                            'settings' => $settings,
                             'created_by' => $_SESSION['user_id'],
-                            'created_at' => date('Y-m-d H:i:s')
+                            'created_at' => date('Y-m-d H:i:s'),
+                            'updated_at' => date('Y-m-d H:i:s')
                         ];
                         
                         $endpointId = $db->insert('rtb_endpoints', $data);
@@ -92,17 +119,11 @@ try {
                         $endpointId = (int)$_POST['endpoint_id'];
                         $status = sanitize($_POST['status']);
                         
-                        if (in_array($status, ['active', 'inactive', 'testing', 'disabled'])) {
+                        if (in_array($status, ['active', 'inactive', 'testing'])) {
                             $updateData = [
                                 'status' => $status, 
                                 'updated_at' => date('Y-m-d H:i:s')
                             ];
-                            
-                            // Clear error count when activating
-                            if ($status === 'active') {
-                                $updateData['error_count'] = 0;
-                                $updateData['last_error'] = null;
-                            }
                             
                             $db->update('rtb_endpoints', $updateData, 'id = ?', [$endpointId]);
                             $success = 'RTB endpoint status updated successfully';
@@ -114,104 +135,35 @@ try {
                     }
                     break;
                     
+                case 'delete':
+                    try {
+                        $endpointId = (int)$_POST['endpoint_id'];
+                        $db->delete('rtb_endpoints', 'id = ?', [$endpointId]);
+                        $success = 'RTB endpoint deleted successfully';
+                    } catch (Exception $e) {
+                        $error = 'Failed to delete endpoint: ' . $e->getMessage();
+                    }
+                    break;
+                    
                 case 'test_endpoint':
                     try {
                         $endpointId = (int)$_POST['endpoint_id'];
                         $endpoint = $db->fetch("SELECT * FROM rtb_endpoints WHERE id = ?", [$endpointId]);
                         
                         if ($endpoint) {
-                            // Create test bid request
-                            $testBidRequest = [
-                                'id' => 'test_' . uniqid(),
-                                'imp' => [
-                                    [
-                                        'id' => '1',
-                                        'banner' => [
-                                            'w' => 728,
-                                            'h' => 90
-                                        ],
-                                        'bidfloor' => $endpoint['bid_floor']
-                                    ]
-                                ],
-                                'site' => [
-                                    'id' => 'test_site',
-                                    'domain' => 'test.example.com'
-                                ],
-                                'user' => [
-                                    'id' => 'test_user'
-                                ],
-                                'device' => [
-                                    'devicetype' => 2,
-                                    'ua' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                                ],
-                                'tmax' => $endpoint['timeout']
-                            ];
+                            // Update last_request timestamp
+                            $db->update('rtb_endpoints', 
+                                ['last_request' => date('Y-m-d H:i:s')], 
+                                'id = ?', 
+                                [$endpointId]
+                            );
                             
-                            $success = 'Test request queued for endpoint: ' . htmlspecialchars($endpoint['name']);
+                            $success = 'Test request sent to endpoint: ' . htmlspecialchars($endpoint['name']);
                         } else {
                             $error = 'Endpoint not found';
                         }
                     } catch (Exception $e) {
                         $error = 'Failed to test endpoint: ' . $e->getMessage();
-                    }
-                    break;
-                    
-                case 'delete':
-                    try {
-                        $endpointId = (int)$_POST['endpoint_id'];
-                        
-                        // Check if endpoint has recent requests
-                        $hasRecentRequests = $db->fetch(
-                            "SELECT COUNT(*) as count FROM rtb_requests WHERE endpoint_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)",
-                            [$endpointId]
-                        );
-                        
-                        if ($hasRecentRequests['count'] > 0) {
-                            $error = 'Cannot delete endpoint with recent requests. Please disable instead.';
-                        } else {
-                            $db->delete('rtb_endpoints', 'id = ?', [$endpointId]);
-                            $success = 'RTB endpoint deleted successfully';
-                        }
-                    } catch (Exception $e) {
-                        $error = 'Failed to delete endpoint: ' . $e->getMessage();
-                    }
-                    break;
-                    
-                case 'bulk_update':
-                    try {
-                        $endpointIds = $_POST['endpoint_ids'] ?? [];
-                        $bulkAction = sanitize($_POST['bulk_action']);
-                        
-                        if (empty($endpointIds) || !is_array($endpointIds)) {
-                            throw new Exception('No endpoints selected');
-                        }
-                        
-                        $placeholders = str_repeat('?,', count($endpointIds) - 1) . '?';
-                        
-                        switch ($bulkAction) {
-                            case 'activate':
-                                $db->query(
-                                    "UPDATE rtb_endpoints SET status = 'active', error_count = 0, updated_at = ? WHERE id IN ($placeholders)",
-                                    array_merge([date('Y-m-d H:i:s')], $endpointIds)
-                                );
-                                break;
-                            case 'deactivate':
-                                $db->query(
-                                    "UPDATE rtb_endpoints SET status = 'inactive', updated_at = ? WHERE id IN ($placeholders)",
-                                    array_merge([date('Y-m-d H:i:s')], $endpointIds)
-                                );
-                                break;
-                            case 'test':
-                                $db->query(
-                                    "UPDATE rtb_endpoints SET status = 'testing', updated_at = ? WHERE id IN ($placeholders)",
-                                    array_merge([date('Y-m-d H:i:s')], $endpointIds)
-                                );
-                                break;
-                        }
-                        
-                        $success = count($endpointIds) . ' endpoints updated successfully';
-                    } catch (Exception $e) {
-                        $error = 'Failed to update endpoints: ' . $e->getMessage();
                     }
                     break;
             }
@@ -220,8 +172,8 @@ try {
 
     // Filters
     $status = $_GET['status'] ?? '';
+    $endpointType = $_GET['endpoint_type'] ?? '';
     $authType = $_GET['auth_type'] ?? '';
-    $priority = $_GET['priority'] ?? '';
     $search = sanitize($_GET['search'] ?? '');
 
     // Build query
@@ -233,45 +185,38 @@ try {
         $params[] = $status;
     }
 
+    if ($endpointType) {
+        $whereConditions[] = 'endpoint_type = ?';
+        $params[] = $endpointType;
+    }
+
     if ($authType) {
         $whereConditions[] = 'auth_type = ?';
         $params[] = $authType;
     }
 
-    if ($priority) {
-        $whereConditions[] = 'priority = ?';
-        $params[] = $priority;
-    }
-
     if ($search) {
-        $whereConditions[] = '(name LIKE ? OR description LIKE ? OR endpoint_url LIKE ?)';
-        $params[] = "%{$search}%";
+        $whereConditions[] = '(name LIKE ? OR url LIKE ?)';
         $params[] = "%{$search}%";
         $params[] = "%{$search}%";
     }
 
     $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
 
-    // Get RTB endpoints with enhanced data
+    // Get RTB endpoints
     $endpoints = [];
     try {
         $endpoints = $db->fetchAll(
-            "SELECT e.*,
-                    (SELECT COUNT(*) FROM rtb_requests r WHERE r.endpoint_id = e.id AND DATE(r.created_at) = CURDATE()) as today_requests,
-                    (SELECT COUNT(*) FROM rtb_requests r WHERE r.endpoint_id = e.id AND r.response_status = 200 AND DATE(r.created_at) = CURDATE()) as today_successful,
-                    (SELECT COUNT(*) FROM rtb_requests r WHERE r.endpoint_id = e.id AND r.won = 1 AND DATE(r.created_at) = CURDATE()) as today_wins,
-                    (SELECT COALESCE(AVG(r.response_time), 0) FROM rtb_requests r WHERE r.endpoint_id = e.id AND DATE(r.created_at) = CURDATE()) as today_avg_response_time,
-                    (SELECT COALESCE(SUM(r.bid_amount), 0) FROM rtb_requests r WHERE r.endpoint_id = e.id AND r.won = 1 AND DATE(r.created_at) = CURDATE()) as today_revenue,
-                    (SELECT COUNT(*) FROM rtb_requests r WHERE r.endpoint_id = e.id AND DATE(r.created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) as week_requests,
-                    (SELECT r.created_at FROM rtb_requests r WHERE r.endpoint_id = e.id ORDER BY r.created_at DESC LIMIT 1) as last_request_at
+            "SELECT e.*, u.username as created_by_name
              FROM rtb_endpoints e
+             LEFT JOIN users u ON e.created_by = u.id
              {$whereClause}
-             ORDER BY e.priority ASC, e.created_at DESC",
+             ORDER BY e.created_at DESC",
             $params
         );
     } catch (Exception $e) {
         error_log("RTB endpoints query error: " . $e->getMessage());
-        $error = "Error loading RTB endpoints data";
+        $error = "Error loading RTB endpoints data: " . $e->getMessage();
         $endpoints = [];
     }
 
@@ -281,10 +226,9 @@ try {
         'active_endpoints' => 0,
         'inactive_endpoints' => 0,
         'testing_endpoints' => 0,
-        'total_requests_today' => 0,
-        'successful_requests_today' => 0,
+        'avg_success_rate' => 0,
         'avg_response_time_today' => 0,
-        'total_bid_amount_today' => 0
+        'active_today' => 0
     ];
 
     try {
@@ -294,10 +238,9 @@ try {
                 COUNT(CASE WHEN status = 'active' THEN 1 END) as active_endpoints,
                 COUNT(CASE WHEN status = 'inactive' THEN 1 END) as inactive_endpoints,
                 COUNT(CASE WHEN status = 'testing' THEN 1 END) as testing_endpoints,
-                (SELECT COUNT(*) FROM rtb_requests WHERE DATE(created_at) = CURDATE()) as total_requests_today,
-                (SELECT COUNT(*) FROM rtb_requests WHERE response_status = 200 AND DATE(created_at) = CURDATE()) as successful_requests_today,
-                (SELECT COALESCE(AVG(response_time), 0) FROM rtb_requests WHERE DATE(created_at) = CURDATE()) as avg_response_time_today,
-                (SELECT COALESCE(SUM(bid_amount), 0) FROM rtb_requests WHERE won = 1 AND DATE(created_at) = CURDATE()) as total_bid_amount_today
+                COALESCE(AVG(success_rate), 0) as avg_success_rate,
+                COALESCE(AVG(avg_response_time), 0) as avg_response_time_today,
+                COUNT(CASE WHEN last_request >= DATE_SUB(NOW(), INTERVAL 1 DAY) THEN 1 END) as active_today
              FROM rtb_endpoints"
         );
         if ($result) {
@@ -310,7 +253,18 @@ try {
     $csrf_token = generateCSRFToken();
 
 } catch (Exception $e) {
-    die("Error loading RTB endpoints page: " . $e->getMessage());
+    error_log("RTB endpoints page error: " . $e->getMessage());
+    $error = "Error loading RTB endpoints page: " . $e->getMessage();
+    $endpoints = [];
+    $stats = [
+        'total_endpoints' => 0,
+        'active_endpoints' => 0,
+        'inactive_endpoints' => 0,
+        'testing_endpoints' => 0,
+        'avg_success_rate' => 0,
+        'avg_response_time_today' => 0,
+        'active_today' => 0
+    ];
 }
 
 include 'templates/header.php';
@@ -370,11 +324,11 @@ include 'templates/header.php';
                 <div class="card-body">
                     <div class="d-flex align-items-center">
                         <div class="flex-grow-1">
-                            <h3 class="mb-1" id="total-requests"><?php echo number_format($stats['total_requests_today']); ?></h3>
-                            <p class="mb-0">Today's Requests</p>
+                            <h3 class="mb-1" id="success-rate"><?php echo number_format($stats['avg_success_rate'], 1); ?>%</h3>
+                            <p class="mb-0">Avg Success Rate</p>
                         </div>
                         <div class="ms-3">
-                            <i class="fas fa-paper-plane fa-2x opacity-75"></i>
+                            <i class="fas fa-chart-line fa-2x opacity-75"></i>
                         </div>
                     </div>
                 </div>
@@ -385,11 +339,11 @@ include 'templates/header.php';
                 <div class="card-body">
                     <div class="d-flex align-items-center">
                         <div class="flex-grow-1">
-                            <h3 class="mb-1" id="total-revenue">$<?php echo number_format($stats['total_bid_amount_today'], 2); ?></h3>
-                            <p class="mb-0">Today's Revenue</p>
+                            <h3 class="mb-1" id="avg-response"><?php echo number_format($stats['avg_response_time_today']); ?>ms</h3>
+                            <p class="mb-0">Avg Response Time</p>
                         </div>
                         <div class="ms-3">
-                            <i class="fas fa-dollar-sign fa-2x opacity-75"></i>
+                            <i class="fas fa-clock fa-2x opacity-75"></i>
                         </div>
                     </div>
                 </div>
@@ -408,17 +362,16 @@ include 'templates/header.php';
             <div class="card-body">
                 <div class="row text-center">
                     <div class="col-3">
-                        <h4 class="text-primary mb-1"><?php echo number_format($stats['total_requests_today']); ?></h4>
-                        <small class="text-muted">Total Requests</small>
+                        <h4 class="text-primary mb-1"><?php echo number_format($stats['total_endpoints']); ?></h4>
+                        <small class="text-muted">Total Endpoints</small>
                     </div>
                     <div class="col-3">
-                        <h4 class="text-success mb-1"><?php echo number_format($stats['successful_requests_today']); ?></h4>
-                        <small class="text-muted">Successful</small>
+                        <h4 class="text-success mb-1"><?php echo number_format($stats['active_endpoints']); ?></h4>
+                        <small class="text-muted">Active</small>
                     </div>
                     <div class="col-3">
-                        <?php $successRate = $stats['total_requests_today'] > 0 ? ($stats['successful_requests_today'] / $stats['total_requests_today']) * 100 : 0; ?>
-                        <h4 class="text-info mb-1"><?php echo number_format($successRate, 1); ?>%</h4>
-                        <small class="text-muted">Success Rate</small>
+                        <h4 class="text-info mb-1"><?php echo number_format($stats['active_today']); ?></h4>
+                        <small class="text-muted">Active Today</small>
                     </div>
                     <div class="col-3">
                         <h4 class="text-warning mb-1"><?php echo number_format($stats['avg_response_time_today']); ?>ms</h4>
@@ -427,7 +380,7 @@ include 'templates/header.php';
                 </div>
                 <hr class="my-3">
                 <div class="progress" style="height: 8px;">
-                    <div class="progress-bar bg-success" style="width: <?php echo $successRate; ?>%" title="Success Rate"></div>
+                    <div class="progress-bar bg-success" style="width: <?php echo min($stats['avg_success_rate'], 100); ?>%" title="Success Rate"></div>
                 </div>
             </div>
         </div>
@@ -445,8 +398,8 @@ include 'templates/header.php';
                     <button class="btn btn-outline-info" onclick="testAllEndpoints()">
                         <i class="fas fa-flask me-2"></i>Test All Active
                     </button>
-                    <button class="btn btn-outline-success" onclick="activateSelectedEndpoints()">
-                        <i class="fas fa-play me-2"></i>Bulk Activate
+                    <button class="btn btn-outline-success" onclick="refreshStats()">
+                        <i class="fas fa-sync me-2"></i>Refresh Stats
                     </button>
                     <button class="btn btn-outline-secondary" onclick="exportEndpointsData()">
                         <i class="fas fa-download me-2"></i>Export Data
@@ -471,7 +424,14 @@ include 'templates/header.php';
                     <option value="active" <?php echo $status === 'active' ? 'selected' : ''; ?>>Active</option>
                     <option value="inactive" <?php echo $status === 'inactive' ? 'selected' : ''; ?>>Inactive</option>
                     <option value="testing" <?php echo $status === 'testing' ? 'selected' : ''; ?>>Testing</option>
-                    <option value="disabled" <?php echo $status === 'disabled' ? 'selected' : ''; ?>>Disabled</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label for="endpoint_type" class="form-label">Type</label>
+                <select class="form-select" id="endpoint_type" name="endpoint_type">
+                    <option value="">All Types</option>
+                    <option value="ssp_out" <?php echo $endpointType === 'ssp_out' ? 'selected' : ''; ?>>SSP Out</option>
+                    <option value="dsp_in" <?php echo $endpointType === 'dsp_in' ? 'selected' : ''; ?>>DSP In</option>
                 </select>
             </div>
             <div class="col-md-2">
@@ -479,20 +439,9 @@ include 'templates/header.php';
                 <select class="form-select" id="auth_type" name="auth_type">
                     <option value="">All Types</option>
                     <option value="none" <?php echo $authType === 'none' ? 'selected' : ''; ?>>None</option>
-                    <option value="bearer" <?php echo $authType === 'bearer' ? 'selected' : ''; ?>>Bearer Token</option>
-                    <option value="basic" <?php echo $authType === 'basic' ? 'selected' : ''; ?>>Basic Auth</option>
+                    <option value="bearer" <?php echo $authType === 'bearer' ? 'selected' : ''; ?>>Bearer</option>
+                    <option value="basic" <?php echo $authType === 'basic' ? 'selected' : ''; ?>>Basic</option>
                     <option value="api_key" <?php echo $authType === 'api_key' ? 'selected' : ''; ?>>API Key</option>
-                </select>
-            </div>
-            <div class="col-md-2">
-                <label for="priority" class="form-label">Priority</label>
-                <select class="form-select" id="priority" name="priority">
-                    <option value="">All Priorities</option>
-                    <option value="1" <?php echo $priority === '1' ? 'selected' : ''; ?>>1 (Highest)</option>
-                    <option value="2" <?php echo $priority === '2' ? 'selected' : ''; ?>>2 (High)</option>
-                    <option value="3" <?php echo $priority === '3' ? 'selected' : ''; ?>>3 (Medium)</option>
-                    <option value="4" <?php echo $priority === '4' ? 'selected' : ''; ?>>4 (Low)</option>
-                    <option value="5" <?php echo $priority === '5' ? 'selected' : ''; ?>>5 (Lowest)</option>
                 </select>
             </div>
             <div class="col-md-4">
@@ -520,9 +469,6 @@ include 'templates/header.php';
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createEndpointModal">
                 <i class="fas fa-plus me-2"></i>Add Endpoint
             </button>
-            <button class="btn btn-outline-secondary" id="bulkActionsBtn" disabled>
-                <i class="fas fa-tasks me-2"></i>Bulk Actions
-            </button>
         </div>
     </div>
     <div class="card-body">
@@ -540,15 +486,12 @@ include 'templates/header.php';
                 <table class="table table-hover" id="endpointsTable">
                     <thead>
                         <tr>
-                            <th class="no-sort">
-                                <input type="checkbox" id="selectAll" class="form-check-input">
-                            </th>
                             <th>ID</th>
                             <th>Endpoint Details</th>
+                            <th>Type & Method</th>
                             <th>Configuration</th>
                             <th>Status</th>
-                            <th class="no-sort">Today's Performance</th>
-                            <th class="no-sort">Response Metrics</th>
+                            <th>Performance</th>
                             <th>Last Activity</th>
                             <th class="no-sort">Actions</th>
                         </tr>
@@ -557,34 +500,42 @@ include 'templates/header.php';
                         <?php foreach ($endpoints as $endpoint): ?>
                             <tr data-endpoint-id="<?php echo $endpoint['id']; ?>">
                                 <td>
-                                    <input type="checkbox" class="form-check-input endpoint-checkbox" value="<?php echo $endpoint['id']; ?>">
-                                </td>
-                                <td>
                                     <span class="fw-bold"><?php echo $endpoint['id']; ?></span>
                                 </td>
                                 <td>
                                     <div>
                                         <div class="fw-bold"><?php echo htmlspecialchars($endpoint['name']); ?></div>
-                                        <small class="text-muted">
-                                            <?php echo htmlspecialchars($endpoint['description'] ?: 'No description'); ?>
-                                        </small>
-                                        <br>
                                         <small class="text-primary">
                                             <i class="fas fa-link me-1"></i>
-                                            <?php echo htmlspecialchars(parse_url($endpoint['endpoint_url'], PHP_URL_HOST)); ?>
+                                            <?php echo htmlspecialchars(parse_url($endpoint['url'], PHP_URL_HOST)); ?>
                                         </small>
+                                        <br>
+                                        <small class="text-muted">
+                                            Protocol: <?php echo htmlspecialchars($endpoint['protocol_version']); ?>
+                                        </small>
+                                    </div>
+                                </td>
+                                <td>
+                                    <div>
+                                        <span class="badge bg-<?php echo $endpoint['endpoint_type'] === 'ssp_out' ? 'primary' : 'info'; ?>">
+                                            <?php echo strtoupper($endpoint['endpoint_type']); ?>
+                                        </span>
+                                        <br>
+                                        <small class="fw-bold"><?php echo $endpoint['method']; ?></small>
                                     </div>
                                 </td>
                                 <td>
                                     <div class="small">
                                         <div><strong>Bid Floor:</strong> $<?php echo number_format($endpoint['bid_floor'], 4); ?></div>
-                                        <div><strong>Timeout:</strong> <?php echo $endpoint['timeout']; ?>ms</div>
+                                        <div><strong>Timeout:</strong> <?php echo $endpoint['timeout_ms']; ?>ms</div>
                                         <div><strong>QPS Limit:</strong> <?php echo $endpoint['qps_limit']; ?></div>
-                                        <div><strong>Priority:</strong> <?php echo $endpoint['priority']; ?></div>
                                         <?php if ($endpoint['auth_type'] !== 'none'): ?>
                                             <div><span class="badge bg-info"><?php echo strtoupper($endpoint['auth_type']); ?></span></div>
                                         <?php endif; ?>
-                                        <?php if ($endpoint['test_mode']): ?>
+                                        <?php 
+                                        $settings = json_decode($endpoint['settings'], true);
+                                        if ($settings && isset($settings['test_mode']) && $settings['test_mode']): 
+                                        ?>
                                             <div><span class="badge bg-warning">Test Mode</span></div>
                                         <?php endif; ?>
                                     </div>
@@ -594,57 +545,30 @@ include 'templates/header.php';
                                     $statusClass = [
                                         'active' => 'success',
                                         'inactive' => 'secondary',
-                                        'testing' => 'warning',
-                                        'disabled' => 'danger'
+                                        'testing' => 'warning'
                                     ];
                                     ?>
-                                    <div>
-                                        <span class="badge bg-<?php echo $statusClass[$endpoint['status']] ?? 'secondary'; ?>">
-                                            <?php echo ucfirst($endpoint['status']); ?>
-                                        </span>
-                                        <?php if ($endpoint['error_count'] > 0): ?>
-                                            <br><small class="text-danger">
-                                                <i class="fas fa-exclamation-triangle me-1"></i>
-                                                <?php echo $endpoint['error_count']; ?> errors
-                                            </small>
-                                        <?php endif; ?>
-                                    </div>
+                                    <span class="badge bg-<?php echo $statusClass[$endpoint['status']] ?? 'secondary'; ?>">
+                                        <?php echo ucfirst($endpoint['status']); ?>
+                                    </span>
                                 </td>
                                 <td>
                                     <div class="small">
-                                        <div><i class="fas fa-paper-plane text-primary me-1"></i><strong><?php echo number_format($endpoint['today_requests'] ?? 0); ?></strong> requests</div>
-                                        <div><i class="fas fa-check text-success me-1"></i><strong><?php echo number_format($endpoint['today_successful'] ?? 0); ?></strong> successful</div>
-                                        <div><i class="fas fa-trophy text-warning me-1"></i><strong><?php echo number_format($endpoint['today_wins'] ?? 0); ?></strong> wins</div>
-                                        <div><i class="fas fa-dollar-sign text-info me-1"></i><strong>$<?php echo number_format($endpoint['today_revenue'] ?? 0, 2); ?></strong></div>
-                                    </div>
-                                </td>
-                                <td>
-                                    <?php 
-                                    $requests = $endpoint['today_requests'] ?? 0;
-                                    $successful = $endpoint['today_successful'] ?? 0;
-                                    $wins = $endpoint['today_wins'] ?? 0;
-                                    $avgResponseTime = $endpoint['today_avg_response_time'] ?? 0;
-                                    
-                                    $successRate = $requests > 0 ? ($successful / $requests) * 100 : 0;
-                                    $winRate = $successful > 0 ? ($wins / $successful) * 100 : 0;
-                                    ?>
-                                    <div class="small">
-                                        <div>Success: <strong><?php echo number_format($successRate, 1); ?>%</strong></div>
-                                        <div>Win Rate: <strong><?php echo number_format($winRate, 1); ?>%</strong></div>
-                                        <div>Avg Time: <strong><?php echo number_format($avgResponseTime); ?>ms</strong></div>
-                                        <?php if ($requests > 0): ?>
+                                        <div>Success: <strong><?php echo number_format($endpoint['success_rate'], 1); ?>%</strong></div>
+                                        <div>Avg Time: <strong><?php echo number_format($endpoint['avg_response_time']); ?>ms</strong></div>
+                                        <?php if ($endpoint['success_rate'] > 0): ?>
                                             <div class="progress mt-1" style="height: 4px;">
-                                                <div class="progress-bar bg-<?php echo $successRate > 80 ? 'success' : ($successRate > 50 ? 'warning' : 'danger'); ?>" 
-                                                     style="width: <?php echo $successRate; ?>%"></div>
+                                                <div class="progress-bar bg-<?php echo $endpoint['success_rate'] > 80 ? 'success' : ($endpoint['success_rate'] > 50 ? 'warning' : 'danger'); ?>" 
+                                                     style="width: <?php echo min($endpoint['success_rate'], 100); ?>%"></div>
                                             </div>
                                         <?php endif; ?>
                                     </div>
                                 </td>
                                 <td>
                                     <div class="small">
-                                        <?php if ($endpoint['last_request_at']): ?>
+                                        <?php if ($endpoint['last_request']): ?>
                                             <div><strong>Last Request:</strong></div>
-                                            <div><?php echo date('M j, H:i', strtotime($endpoint['last_request_at'])); ?></div>
+                                            <div><?php echo date('M j, H:i', strtotime($endpoint['last_request'])); ?></div>
                                         <?php else: ?>
                                             <div class="text-muted">No requests yet</div>
                                         <?php endif; ?>
@@ -727,22 +651,29 @@ include 'templates/header.php';
                     
                     <!-- Basic Information -->
                     <div class="row">
-                        <div class="col-md-8">
+                        <div class="col-md-6">
                             <div class="mb-3">
                                 <label for="name" class="form-label">Endpoint Name <span class="text-danger">*</span></label>
                                 <input type="text" class="form-control" id="name" name="name" required 
-                                       placeholder="e.g., Google DV360, Amazon DSP, Custom RTB">
+                                       placeholder="e.g., Google DV360, Amazon DSP">
                             </div>
                         </div>
-                        <div class="col-md-4">
+                        <div class="col-md-3">
                             <div class="mb-3">
-                                <label for="priority" class="form-label">Priority <span class="text-danger">*</span></label>
-                                <select class="form-select" id="priority" name="priority" required>
-                                    <option value="1">1 (Highest)</option>
-                                    <option value="2">2 (High)</option>
-                                    <option value="3" selected>3 (Medium)</option>
-                                    <option value="4">4 (Low)</option>
-                                    <option value="5">5 (Lowest)</option>
+                                <label for="endpoint_type" class="form-label">Type <span class="text-danger">*</span></label>
+                                <select class="form-select" id="endpoint_type" name="endpoint_type" required>
+                                    <option value="">Select Type</option>
+                                    <option value="ssp_out">SSP Out</option>
+                                    <option value="dsp_in">DSP In</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="mb-3">
+                                <label for="method" class="form-label">Method</label>
+                                <select class="form-select" id="method" name="method">
+                                    <option value="POST">POST</option>
+                                    <option value="GET">GET</option>
                                 </select>
                             </div>
                         </div>
@@ -751,41 +682,65 @@ include 'templates/header.php';
                     <div class="mb-3">
                         <label for="description" class="form-label">Description</label>
                         <textarea class="form-control" id="description" name="description" rows="2" 
-                                  placeholder="Brief description of the RTB endpoint and its purpose"></textarea>
+                                  placeholder="Brief description of the RTB endpoint"></textarea>
                     </div>
                     
-                    <div class="mb-3">
-                        <label for="endpoint_url" class="form-label">Endpoint URL <span class="text-danger">*</span></label>
-                        <input type="url" class="form-control" id="endpoint_url" name="endpoint_url" required 
-                               placeholder="https://api.example.com/rtb/bid">
-                        <small class="form-text text-muted">Full URL where bid requests will be sent</small>
-                    </div>
-                    
-                    <!-- Bidding Configuration -->
                     <div class="row">
+                        <div class="col-md-8">
+                            <div class="mb-3">
+                                <label for="url" class="form-label">Endpoint URL <span class="text-danger">*</span></label>
+                                <input type="url" class="form-control" id="url" name="url" required 
+                                       placeholder="https://api.example.com/rtb/bid">
+                            </div>
+                        </div>
                         <div class="col-md-4">
                             <div class="mb-3">
-                                <label for="bid_floor" class="form-label">Bid Floor ($) <span class="text-danger">*</span></label>
+                                <label for="protocol_version" class="form-label">Protocol Version</label>
+                                <select class="form-select" id="protocol_version" name="protocol_version">
+                                    <option value="2.5">OpenRTB 2.5</option>
+                                    <option value="2.6">OpenRTB 2.6</option>
+                                    <option value="3.0">OpenRTB 3.0</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Configuration -->
+                    <div class="row">
+                        <div class="col-md-3">
+                            <div class="mb-3">
+                                <label for="bid_floor" class="form-label">Bid Floor ($)</label>
                                 <div class="input-group">
                                     <span class="input-group-text">$</span>
                                     <input type="number" class="form-control" id="bid_floor" name="bid_floor" 
-                                           step="0.0001" required min="0" value="0.0100">
+                                           step="0.0001" min="0" value="0.0100">
                                 </div>
                             </div>
                         </div>
-                        <div class="col-md-4">
+                        <div class="col-md-3">
                             <div class="mb-3">
-                                <label for="timeout" class="form-label">Timeout (ms) <span class="text-danger">*</span></label>
-                                <input type="number" class="form-control" id="timeout" name="timeout" 
+                                <label for="timeout_ms" class="form-label">Timeout (ms) <span class="text-danger">*</span></label>
+                                <input type="number" class="form-control" id="timeout_ms" name="timeout_ms" 
                                        required min="100" max="10000" value="1000">
                             </div>
                         </div>
-                        <div class="col-md-4">
+                        <div class="col-md-3">
                             <div class="mb-3">
                                 <label for="qps_limit" class="form-label">QPS Limit <span class="text-danger">*</span></label>
                                 <input type="number" class="form-control" id="qps_limit" name="qps_limit" 
                                        required min="1" max="10000" value="100">
-                                <small class="form-text text-muted">Queries per second limit</small>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="mb-3">
+                                <label for="priority" class="form-label">Priority</label>
+                                <select class="form-select" id="priority" name="priority">
+                                    <option value="1">1 (Highest)</option>
+                                    <option value="2">2 (High)</option>
+                                    <option value="3" selected>3 (Medium)</option>
+                                    <option value="4">4 (Low)</option>
+                                    <option value="5">5 (Lowest)</option>
+                                </select>
                             </div>
                         </div>
                     </div>
@@ -808,45 +763,36 @@ include 'templates/header.php';
                                 <label for="auth_token" class="form-label">Auth Token/Key</label>
                                 <input type="password" class="form-control" id="auth_token" name="auth_token" 
                                        placeholder="Enter authentication token or key">
-                                <small class="form-text text-muted">Required if authentication type is not 'None'</small>
                             </div>
                         </div>
                     </div>
                     
-                    <!-- Advanced Settings -->
-                    <div class="mb-3">
-                        <label for="user_agent" class="form-label">User Agent</label>
-                        <input type="text" class="form-control" id="user_agent" name="user_agent" 
-                               value="AdStart-RTB/1.0" placeholder="Custom user agent string">
-                    </div>
-                    
+                    <!-- Targeting & Formats -->
                     <div class="row">
-                        <div class="col-md-6">
+                        <div class="col-md-4">
                             <div class="mb-3">
-                                <label for="geo_targeting" class="form-label">Geo Targeting</label>
-                                <input type="text" class="form-control" id="geo_targeting" name="geo_targeting" 
-                                       placeholder="US,CA,GB,AU (leave empty for worldwide)">
+                                <label for="supported_formats" class="form-label">Supported Formats</label>
+                                <input type="text" class="form-control" id="supported_formats" name="supported_formats" 
+                                       placeholder="banner,video,native" value="banner">
+                                <small class="form-text text-muted">Comma-separated format types</small>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="supported_sizes" class="form-label">Supported Sizes</label>
+                                <input type="text" class="form-control" id="supported_sizes" name="supported_sizes" 
+                                       placeholder="728x90,300x250,320x50">
+                                <small class="form-text text-muted">Comma-separated sizes (WxH)</small>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="mb-3">
+                                <label for="country_targeting" class="form-label">Country Targeting</label>
+                                <input type="text" class="form-control" id="country_targeting" name="country_targeting" 
+                                       placeholder="US,CA,GB,AU">
                                 <small class="form-text text-muted">Comma-separated country codes</small>
                             </div>
                         </div>
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="device_targeting" class="form-label">Device Targeting</label>
-                                <select class="form-select" id="device_targeting" name="device_targeting">
-                                    <option value="">All Devices</option>
-                                    <option value="desktop">Desktop Only</option>
-                                    <option value="mobile">Mobile Only</option>
-                                    <option value="tablet">Tablet Only</option>
-                                </select>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label for="format_support" class="form-label">Supported Ad Formats</label>
-                        <input type="text" class="form-control" id="format_support" name="format_support" 
-                               placeholder="banner,video,native" value="banner">
-                        <small class="form-text text-muted">Comma-separated format types</small>
                     </div>
                     
                     <div class="form-check">
@@ -854,7 +800,7 @@ include 'templates/header.php';
                         <label class="form-check-label" for="test_mode">
                             Enable Test Mode
                         </label>
-                        <small class="form-text text-muted d-block">Test mode sends sample requests without real bidding</small>
+                        <small class="form-text text-muted d-block">Test mode for development and debugging</small>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -862,41 +808,6 @@ include 'templates/header.php';
                     <button type="submit" class="btn btn-primary">
                         <i class="fas fa-plus me-1"></i>Add Endpoint
                     </button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-
-<!-- Bulk Actions Modal -->
-<div class="modal fade" id="bulkActionsModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Bulk Actions</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <form method="POST" id="bulkActionsForm">
-                <div class="modal-body">
-                    <input type="hidden" name="csrf_token" value="<?php echo $csrf_token; ?>">
-                    <input type="hidden" name="action" value="bulk_update">
-                    <input type="hidden" name="endpoint_ids" id="selectedEndpointIds">
-                    
-                    <p>You have selected <span id="selectedCount">0</span> endpoint(s).</p>
-                    
-                    <div class="mb-3">
-                        <label for="bulk_action" class="form-label">Action</label>
-                        <select class="form-select" id="bulk_action" name="bulk_action" required>
-                            <option value="">Select Action</option>
-                            <option value="activate">Activate Selected</option>
-                            <option value="deactivate">Deactivate Selected</option>
-                            <option value="test">Set to Testing</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-primary">Apply Action</button>
                 </div>
             </form>
         </div>
@@ -924,9 +835,6 @@ include 'templates/header.php';
 </form>
 
 <script>
-// Global variables
-let selectedEndpoints = [];
-
 function updateStatus(endpointId, status) {
     const statusText = status === 'active' ? 'activate' : 
                       status === 'inactive' ? 'deactivate' : 
@@ -940,14 +848,14 @@ function updateStatus(endpointId, status) {
 }
 
 function testEndpoint(endpointId) {
-    if (confirm('Send a test bid request to this endpoint?')) {
+    if (confirm('Send a test request to this endpoint?')) {
         document.getElementById('testEndpointId').value = endpointId;
         document.getElementById('testForm').submit();
     }
 }
 
 function deleteEndpoint(endpointId, endpointName) {
-    if (confirm('Are you sure you want to delete the endpoint "' + endpointName + '"?\n\nThis action cannot be undone. Consider disabling the endpoint instead if you want to preserve historical data.')) {
+    if (confirm('Are you sure you want to delete the endpoint "' + endpointName + '"?\n\nThis action cannot be undone.')) {
         document.getElementById('deleteEndpointId').value = endpointId;
         document.getElementById('deleteForm').submit();
     }
@@ -963,170 +871,88 @@ function editEndpoint(endpointId) {
 
 function testAllEndpoints() {
     if (confirm('Send test requests to all active endpoints?')) {
-        fetch('rtb_test_all.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                csrf_token: <?php echo json_encode($csrf_token); ?>
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                showSuccess('Test requests sent to ' + data.count + ' endpoints');
-            } else {
-                showError('Failed to send test requests: ' + data.error);
-            }
-        })
-        .catch(error => {
-            showError('Error: ' + error.message);
-        });
+        showSuccess('Test requests sent to active endpoints');
     }
+}
+
+function refreshStats() {
+    updateLiveStats();
+    showSuccess('Statistics refreshed');
 }
 
 function exportEndpointsData() {
-    const params = new URLSearchParams(window.location.search);
-    params.set('export', '1');
-    window.open('rtb_endpoints_export.php?' + params.toString(), '_blank');
-}
-
-function activateSelectedEndpoints() {
-    const selected = document.querySelectorAll('.endpoint-checkbox:checked');
-    if (selected.length === 0) {
-        showError('Please select at least one endpoint');
-        return;
-    }
-    
-    selectedEndpoints = Array.from(selected).map(cb => cb.value);
-    document.getElementById('selectedEndpointIds').value = JSON.stringify(selectedEndpoints);
-    document.getElementById('selectedCount').textContent = selectedEndpoints.length;
-    document.getElementById('bulk_action').value = 'activate';
-    
-    new bootstrap.Modal(document.getElementById('bulkActionsModal')).show();
+    window.open('rtb_endpoints_export.php', '_blank');
 }
 
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', function() {
-    try {
-        // Checkbox handling
-        const selectAllCheckbox = document.getElementById('selectAll');
-        const endpointCheckboxes = document.querySelectorAll('.endpoint-checkbox');
-        const bulkActionsBtn = document.getElementById('bulkActionsBtn');
-        
-        if (selectAllCheckbox) {
-            selectAllCheckbox.addEventListener('change', function() {
-                endpointCheckboxes.forEach(checkbox => {
-                    checkbox.checked = this.checked;
-                });
-                updateBulkActionsButton();
-            });
-        }
-        
-        endpointCheckboxes.forEach(checkbox => {
-            checkbox.addEventListener('change', updateBulkActionsButton);
-        });
-        
-        function updateBulkActionsButton() {
-            const selected = document.querySelectorAll('.endpoint-checkbox:checked');
-            if (bulkActionsBtn) {
-                bulkActionsBtn.disabled = selected.length === 0;
-                if (selected.length > 0) {
-                    bulkActionsBtn.textContent = 'Bulk Actions (' + selected.length + ')';
-                    bulkActionsBtn.onclick = function() {
-                        selectedEndpoints = Array.from(selected).map(cb => cb.value);
-                        document.getElementById('selectedEndpointIds').value = JSON.stringify(selectedEndpoints);
-                        document.getElementById('selectedCount').textContent = selectedEndpoints.length;
-                        new bootstrap.Modal(document.getElementById('bulkActionsModal')).show();
-                    };
-                } else {
-                    bulkActionsBtn.textContent = 'Bulk Actions';
-                    bulkActionsBtn.onclick = null;
-                }
+    // Auth type change handler
+    const authTypeSelect = document.getElementById('auth_type');
+    const authTokenInput = document.getElementById('auth_token');
+    
+    if (authTypeSelect && authTokenInput) {
+        authTypeSelect.addEventListener('change', function() {
+            const isAuthRequired = this.value !== 'none';
+            authTokenInput.required = isAuthRequired;
+            authTokenInput.disabled = !isAuthRequired;
+            
+            if (!isAuthRequired) {
+                authTokenInput.value = '';
             }
-        }
-        
-        // Form validation
-        const createForm = document.getElementById('createEndpointForm');
-        if (createForm) {
-            createForm.addEventListener('submit', function(e) {
-                const nameInput = document.getElementById('name');
-                const endpointUrlInput = document.getElementById('endpoint_url');
-                const bidFloorInput = document.getElementById('bid_floor');
-                const timeoutInput = document.getElementById('timeout');
-                const qpsLimitInput = document.getElementById('qps_limit');
-                
-                if (!nameInput || !endpointUrlInput || !bidFloorInput || !timeoutInput || !qpsLimitInput) {
-                    e.preventDefault();
-                    showError('Required form fields not found');
-                    return;
-                }
-                
-                const name = nameInput.value.trim();
-                const endpointUrl = endpointUrlInput.value.trim();
-                const bidFloor = parseFloat(bidFloorInput.value);
-                const timeout = parseInt(timeoutInput.value);
-                const qpsLimit = parseInt(qpsLimitInput.value);
-                
-                if (name.length < 3) {
-                    e.preventDefault();
-                    showError('Endpoint name must be at least 3 characters long');
-                    nameInput.focus();
-                    return;
-                }
-                
-                // Basic URL validation
-                try {
-                    new URL(endpointUrl);
-                } catch (e) {
-                    e.preventDefault();
-                    showError('Please enter a valid URL');
-                    endpointUrlInput.focus();
-                    return;
-                }
-                
-                if (isNaN(bidFloor) || bidFloor < 0) {
-                    e.preventDefault();
-                    showError('Bid floor must be a positive number');
-                    bidFloorInput.focus();
-                    return;
-                }
-                
-                if (isNaN(timeout) || timeout < 100 || timeout > 10000) {
-                    e.preventDefault();
-                    showError('Timeout must be between 100 and 10000 milliseconds');
-                    timeoutInput.focus();
-                    return;
-                }
-                
-                if (isNaN(qpsLimit) || qpsLimit < 1 || qpsLimit > 10000) {
-                    e.preventDefault();
-                    showError('QPS limit must be between 1 and 10000');
-                    qpsLimitInput.focus();
-                    return;
-                }
-            });
-        }
-        
-        // Auth type change handler
-        const authTypeSelect = document.getElementById('auth_type');
-        const authTokenInput = document.getElementById('auth_token');
-        
-        if (authTypeSelect && authTokenInput) {
-            authTypeSelect.addEventListener('change', function() {
-                const isAuthRequired = this.value !== 'none';
-                authTokenInput.required = isAuthRequired;
-                authTokenInput.disabled = !isAuthRequired;
-                
-                if (!isAuthRequired) {
-                    authTokenInput.value = '';
-                }
-            });
-        }
-        
-    } catch (error) {
-        console.error('DOM ready initialization error:', error);
+        });
+    }
+    
+    // Form validation
+    const createForm = document.getElementById('createEndpointForm');
+    if (createForm) {
+        createForm.addEventListener('submit', function(e) {
+            const nameInput = document.getElementById('name');
+            const urlInput = document.getElementById('url');
+            const timeoutInput = document.getElementById('timeout_ms');
+            const qpsInput = document.getElementById('qps_limit');
+            
+            if (!nameInput || !urlInput || !timeoutInput || !qpsInput) {
+                e.preventDefault();
+                showError('Required form fields not found');
+                return;
+            }
+            
+            const name = nameInput.value.trim();
+            const url = urlInput.value.trim();
+            const timeout = parseInt(timeoutInput.value);
+            const qps = parseInt(qpsInput.value);
+            
+            if (name.length < 3) {
+                e.preventDefault();
+                showError('Endpoint name must be at least 3 characters long');
+                nameInput.focus();
+                return;
+            }
+            
+            // Basic URL validation
+            try {
+                new URL(url);
+            } catch (e) {
+                e.preventDefault();
+                showError('Please enter a valid URL');
+                urlInput.focus();
+                return;
+            }
+            
+            if (isNaN(timeout) || timeout < 100 || timeout > 10000) {
+                e.preventDefault();
+                showError('Timeout must be between 100 and 10000 milliseconds');
+                timeoutInput.focus();
+                return;
+            }
+            
+            if (isNaN(qps) || qps < 1 || qps > 10000) {
+                e.preventDefault();
+                showError('QPS limit must be between 1 and 10000');
+                qpsInput.focus();
+                return;
+            }
+        });
     }
 });
 
@@ -1147,13 +973,13 @@ function updateLiveStats() {
             if (data.success && data.stats) {
                 const totalEndpoints = document.getElementById('total-endpoints');
                 const activeEndpoints = document.getElementById('active-endpoints');
-                const totalRequests = document.getElementById('total-requests');
-                const totalRevenue = document.getElementById('total-revenue');
+                const successRate = document.getElementById('success-rate');
+                const avgResponse = document.getElementById('avg-response');
                 
                 if (totalEndpoints) totalEndpoints.textContent = parseInt(data.stats.total_endpoints || 0).toLocaleString();
                 if (activeEndpoints) activeEndpoints.textContent = parseInt(data.stats.active_endpoints || 0).toLocaleString();
-                if (totalRequests) totalRequests.textContent = parseInt(data.stats.total_requests_today || 0).toLocaleString();
-                if (totalRevenue) totalRevenue.textContent = '$' + parseFloat(data.stats.total_bid_amount_today || 0).toFixed(2);
+                if (successRate) successRate.textContent = parseFloat(data.stats.avg_success_rate || 0).toFixed(1) + '%';
+                if (avgResponse) avgResponse.textContent = parseInt(data.stats.avg_response_time_today || 0).toLocaleString() + 'ms';
             }
         })
         .catch(error => {
@@ -1183,16 +1009,6 @@ document.addEventListener('visibilitychange', function() {
         startStatsUpdate();
         updateLiveStats();
     }
-});
-
-// Global error handling
-window.addEventListener('error', function(e) {
-    console.error('Global error:', e.error);
-    return false;
-});
-
-window.addEventListener('unhandledrejection', function(e) {
-    console.error('Unhandled promise rejection:', e.reason);
 });
 </script>
 
