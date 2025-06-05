@@ -1,6 +1,7 @@
 <?php
-require_once '../config/app.php';
+require_once '../config/init.php';
 require_once '../config/database.php';
+require_once '../config/constants.php';
 require_once '../includes/auth.php';
 require_once '../includes/helpers.php';
 
@@ -150,6 +151,14 @@ $csrf_token = generateCSRFToken();
                             </small>
                         </div>
                     </div>
+                </div>
+                
+                <div class="text-center mt-3">
+                    <small class="text-white">
+                        <strong>Demo Login:</strong><br>
+                        Email: admin@adstart.click<br>
+                        Password: password
+                    </small>
                 </div>
             </div>
         </div>
