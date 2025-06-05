@@ -1,110 +1,140 @@
 <?php
 $pageTitle = 'Site Management';
-require_once '../config/app.php';
-require_once '../config/database.php';
-require_once '../includes/auth.php';
-require_once '../includes/helpers.php';
+$breadcrumb = [
+    ['text' => 'Sites']
+];
 
-$auth = new Auth();
-$auth->requireAuth(USER_TYPE_ADMIN);
+try {
+    require_once '../config/init.php';
+    require_once '../config/database.php';
+    require_once '../config/constants.php';
+    require_once '../includes/auth.php';
+    require_once '../includes/helpers.php';
 
-$db = Database::getInstance();
+    $auth = new Auth();
+    $db = Database::getInstance();
 
-// Handle actions
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = $_POST['action'] ?? '';
-    $csrf_token = $_POST['csrf_token'] ?? '';
-    
-    if (!verifyCSRFToken($csrf_token)) {
-        $error = 'Invalid security token';
-    } else {
-        switch ($action) {
-            case 'approve':
-                $siteId = (int)$_POST['site_id'];
-                $db->update('sites', [
-                    'status' => 'active',
-                    'approved_at' => date('Y-m-d H:i:s'),
-                    'approved_by' => $_SESSION['user_id']
-                ], 'id = ?', [$siteId]);
-                $success = 'Site approved successfully';
-                break;
-                
-            case 'reject':
-                $siteId = (int)$_POST['site_id'];
-                $notes = sanitize($_POST['approval_notes']);
-                $db->update('sites', [
-                    'status' => 'rejected',
-                    'approval_notes' => $notes
-                ], 'id = ?', [$siteId]);
-                $success = 'Site rejected';
-                break;
-                
-            case 'suspend':
-                $siteId = (int)$_POST['site_id'];
-                $db->update('sites', ['status' => 'inactive'], 'id = ?', [$siteId]);
-                $success = 'Site suspended';
-                break;
+    // Handle actions
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $action = $_POST['action'] ?? '';
+        $csrf_token = $_POST['csrf_token'] ?? '';
+        
+        if (!verifyCSRFToken($csrf_token)) {
+            $error = 'Invalid security token';
+        } else {
+            switch ($action) {
+                case 'approve':
+                    $siteId = (int)$_POST['site_id'];
+                    $db->update('sites', [
+                        'status' => 'active',
+                        'approved_at' => date('Y-m-d H:i:s'),
+                        'approved_by' => $_SESSION['user_id']
+                    ], 'id = ?', [$siteId]);
+                    $success = 'Site approved successfully';
+                    break;
+                    
+                case 'reject':
+                    $siteId = (int)$_POST['site_id'];
+                    $notes = sanitize($_POST['approval_notes']);
+                    $db->update('sites', [
+                        'status' => 'rejected',
+                        'approval_notes' => $notes
+                    ], 'id = ?', [$siteId]);
+                    $success = 'Site rejected';
+                    break;
+                    
+                case 'suspend':
+                    $siteId = (int)$_POST['site_id'];
+                    $db->update('sites', ['status' => 'inactive'], 'id = ?', [$siteId]);
+                    $success = 'Site suspended';
+                    break;
+            }
         }
     }
+
+    // Filters
+    $status = $_GET['status'] ?? '';
+    $category = $_GET['category'] ?? '';
+    $search = sanitize($_GET['search'] ?? '');
+
+    // Build query
+    $whereConditions = [];
+    $params = [];
+
+    if ($status) {
+        $whereConditions[] = 's.status = ?';
+        $params[] = $status;
+    }
+
+    if ($category) {
+        $whereConditions[] = 's.category_id = ?';
+        $params[] = $category;
+    }
+
+    if ($search) {
+        $whereConditions[] = '(s.name LIKE ? OR s.url LIKE ? OR u.username LIKE ?)';
+        $params[] = "%{$search}%";
+        $params[] = "%{$search}%";
+        $params[] = "%{$search}%";
+    }
+
+    $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
+
+    // Get sites
+    $sites = [];
+    try {
+        $sites = $db->fetchAll(
+            "SELECT s.*, u.username, u.email, c.name as category_name,
+                    (SELECT COUNT(*) FROM zones z WHERE z.site_id = s.id) as zone_count,
+                    (SELECT SUM(te.revenue) FROM tracking_events te 
+                     JOIN zones z ON te.zone_id = z.id 
+                     WHERE z.site_id = s.id AND DATE(te.created_at) = CURDATE()) as today_revenue
+             FROM sites s
+             JOIN users u ON s.user_id = u.id
+             LEFT JOIN categories c ON s.category_id = c.id
+             {$whereClause}
+             ORDER BY s.created_at DESC",
+            $params
+        );
+    } catch (Exception $e) {
+        error_log("Sites query error: " . $e->getMessage());
+        $error = "Error loading sites data";
+    }
+
+    // Get categories for filter
+    $categories = [];
+    try {
+        $categories = $db->fetchAll("SELECT id, name FROM categories ORDER BY name");
+    } catch (Exception $e) {
+        error_log("Categories query error: " . $e->getMessage());
+    }
+
+    // Statistics
+    $stats = [
+        'total_sites' => 0,
+        'active_sites' => 0,
+        'pending_sites' => 0,
+        'rejected_sites' => 0
+    ];
+
+    try {
+        $stats = $db->fetch(
+            "SELECT 
+                COUNT(*) as total_sites,
+                COUNT(CASE WHEN status = 'active' THEN 1 END) as active_sites,
+                COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_sites,
+                COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected_sites
+             FROM sites"
+        );
+    } catch (Exception $e) {
+        error_log("Site stats error: " . $e->getMessage());
+    }
+
+    $csrf_token = generateCSRFToken();
+
+} catch (Exception $e) {
+    die("Error loading sites page: " . $e->getMessage());
 }
-
-// Filters
-$status = $_GET['status'] ?? '';
-$category = $_GET['category'] ?? '';
-$search = sanitize($_GET['search'] ?? '');
-
-// Build query
-$whereConditions = [];
-$params = [];
-
-if ($status) {
-    $whereConditions[] = 's.status = ?';
-    $params[] = $status;
-}
-
-if ($category) {
-    $whereConditions[] = 's.category_id = ?';
-    $params[] = $category;
-}
-
-if ($search) {
-    $whereConditions[] = '(s.name LIKE ? OR s.url LIKE ? OR u.username LIKE ?)';
-    $params[] = "%{$search}%";
-    $params[] = "%{$search}%";
-    $params[] = "%{$search}%";
-}
-
-$whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
-
-// Get sites
-$sites = $db->fetchAll(
-    "SELECT s.*, u.username, u.email, c.name as category_name,
-            (SELECT COUNT(*) FROM zones z WHERE z.site_id = s.id) as zone_count,
-            (SELECT SUM(te.revenue) FROM tracking_events te 
-             JOIN zones z ON te.zone_id = z.id 
-             WHERE z.site_id = s.id AND DATE(te.created_at) = CURDATE()) as today_revenue
-     FROM sites s
-     JOIN users u ON s.user_id = u.id
-     LEFT JOIN categories c ON s.category_id = c.id
-     {$whereClause}
-     ORDER BY s.created_at DESC",
-    $params
-);
-
-// Get categories for filter
-$categories = $db->fetchAll("SELECT id, name FROM categories ORDER BY name");
-
-// Statistics
-$stats = $db->fetch(
-    "SELECT 
-        COUNT(*) as total_sites,
-        COUNT(CASE WHEN status = 'active' THEN 1 END) as active_sites,
-        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_sites,
-        COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected_sites
-     FROM sites"
-);
-
-$csrf_token = generateCSRFToken();
 
 include 'templates/header.php';
 ?>
@@ -127,39 +157,63 @@ include 'templates/header.php';
 
 <!-- Stats Cards -->
 <div class="row mb-4">
-    <div class="col-md-3">
+    <div class="col-lg-3 col-md-6 mb-4">
         <div class="card stats-card">
-            <div class="card-body text-center">
-                <i class="fas fa-globe fa-2x mb-2"></i>
-                <h4><?php echo formatNumber($stats['total_sites']); ?></h4>
-                <p class="mb-0">Total Sites</p>
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <div class="flex-grow-1">
+                        <h3 class="mb-1"><?php echo number_format($stats['total_sites']); ?></h3>
+                        <p class="mb-0">Total Sites</p>
+                    </div>
+                    <div class="ms-3">
+                        <i class="fas fa-globe fa-2x opacity-75"></i>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-lg-3 col-md-6 mb-4">
         <div class="card stats-card-success">
-            <div class="card-body text-center">
-                <i class="fas fa-check fa-2x mb-2"></i>
-                <h4><?php echo formatNumber($stats['active_sites']); ?></h4>
-                <p class="mb-0">Active Sites</p>
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <div class="flex-grow-1">
+                        <h3 class="mb-1"><?php echo number_format($stats['active_sites']); ?></h3>
+                        <p class="mb-0">Active Sites</p>
+                    </div>
+                    <div class="ms-3">
+                        <i class="fas fa-check fa-2x opacity-75"></i>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-lg-3 col-md-6 mb-4">
         <div class="card stats-card-warning">
-            <div class="card-body text-center">
-                <i class="fas fa-clock fa-2x mb-2"></i>
-                <h4><?php echo formatNumber($stats['pending_sites']); ?></h4>
-                <p class="mb-0">Pending Approval</p>
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <div class="flex-grow-1">
+                        <h3 class="mb-1"><?php echo number_format($stats['pending_sites']); ?></h3>
+                        <p class="mb-0">Pending Approval</p>
+                    </div>
+                    <div class="ms-3">
+                        <i class="fas fa-clock fa-2x opacity-75"></i>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
-    <div class="col-md-3">
+    <div class="col-lg-3 col-md-6 mb-4">
         <div class="card stats-card-info">
-            <div class="card-body text-center">
-                <i class="fas fa-times fa-2x mb-2"></i>
-                <h4><?php echo formatNumber($stats['rejected_sites']); ?></h4>
-                <p class="mb-0">Rejected Sites</p>
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <div class="flex-grow-1">
+                        <h3 class="mb-1"><?php echo number_format($stats['rejected_sites']); ?></h3>
+                        <p class="mb-0">Rejected Sites</p>
+                    </div>
+                    <div class="ms-3">
+                        <i class="fas fa-times fa-2x opacity-75"></i>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -167,6 +221,9 @@ include 'templates/header.php';
 
 <!-- Filters -->
 <div class="card mb-4">
+    <div class="card-header">
+        <h5 class="mb-0"><i class="fas fa-filter me-2"></i>Filters</h5>
+    </div>
     <div class="card-body">
         <form method="GET" class="row g-3">
             <div class="col-md-3">
@@ -234,17 +291,21 @@ include 'templates/header.php';
                         <tr>
                             <td><?php echo $site['id']; ?></td>
                             <td>
-                                <div class="fw-bold"><?php echo htmlspecialchars($site['name']); ?></div>
-                                <small class="text-muted">
-                                    <a href="<?php echo htmlspecialchars($site['url']); ?>" target="_blank" class="text-decoration-none">
-                                        <?php echo htmlspecialchars($site['url']); ?>
-                                        <i class="fas fa-external-link-alt ms-1"></i>
-                                    </a>
-                                </small>
+                                <div>
+                                    <div class="fw-bold"><?php echo htmlspecialchars($site['name']); ?></div>
+                                    <small class="text-muted">
+                                        <a href="<?php echo htmlspecialchars($site['url']); ?>" target="_blank" class="text-decoration-none">
+                                            <?php echo htmlspecialchars($site['url']); ?>
+                                            <i class="fas fa-external-link-alt ms-1"></i>
+                                        </a>
+                                    </small>
+                                </div>
                             </td>
                             <td>
-                                <div><?php echo htmlspecialchars($site['username']); ?></div>
-                                <small class="text-muted"><?php echo htmlspecialchars($site['email']); ?></small>
+                                <div>
+                                    <div class="fw-bold"><?php echo htmlspecialchars($site['username']); ?></div>
+                                    <small class="text-muted"><?php echo htmlspecialchars($site['email']); ?></small>
+                                </div>
                             </td>
                             <td>
                                 <?php if ($site['category_name']): ?>
@@ -271,11 +332,11 @@ include 'templates/header.php';
                             </td>
                             <td>
                                 <span class="text-success fw-bold">
-                                    <?php echo formatCurrency($site['today_revenue'] ?? 0); ?>
+                                    $<?php echo number_format($site['today_revenue'] ?? 0, 2); ?>
                                 </span>
                             </td>
                             <td>
-                                <?php echo formatNumber($site['monthly_pageviews']); ?>
+                                <?php echo number_format($site['monthly_pageviews'] ?? 0); ?>
                             </td>
                             <td>
                                 <small><?php echo date('M j, Y', strtotime($site['created_at'])); ?></small>
