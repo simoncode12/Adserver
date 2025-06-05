@@ -59,6 +59,20 @@ define('COMMISSION_RATE', 0.10); // 10%
 // Timezone
 date_default_timezone_set('UTC');
 
+// Now that DEBUG_MODE is defined, set proper error reporting
+if (DEBUG_MODE) {
+    ini_set('display_errors', 1);
+    ini_set('display_startup_errors', 1);
+    error_reporting(E_ALL);
+} else {
+    ini_set('display_errors', 0);
+    ini_set('display_startup_errors', 0);
+    error_reporting(0);
+}
+
+// Update session lifetime now that it's defined
+ini_set('session.gc_maxlifetime', SESSION_LIFETIME);
+
 // Start session if not already started
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
