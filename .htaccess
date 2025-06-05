@@ -1,0 +1,79 @@
+# AdServer Platform .htaccess
+# Clean URLs and Security Configuration
+
+RewriteEngine On
+
+# Security Headers
+Header always set X-Content-Type-Options nosniff
+Header always set X-Frame-Options DENY
+Header always set X-XSS-Protection "1; mode=block"
+Header always set Referrer-Policy "strict-origin-when-cross-origin"
+Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' cdn.jsdelivr.net cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' cdn.jsdelivr.net cdnjs.cloudflare.com; img-src 'self' data: *; font-src 'self' cdnjs.cloudflare.com; connect-src 'self'"
+
+# Prevent access to sensitive files
+<Files ~ "^\.">
+    Order allow,deny
+    Deny from all
+</Files>
+
+<FilesMatch "\.(md|json|lock|log|txt)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
+# Prevent access to config and includes directories
+RedirectMatch 404 /config/.*
+RedirectMatch 404 /includes/.*
+RedirectMatch 404 /logs/.*
+
+# Clean URLs for admin panel
+RewriteRule ^admin$ admin/index.php [L]
+RewriteRule ^admin/([^/]+)/?$ admin/$1.php [L]
+
+# Clean URLs for publisher panel
+RewriteRule ^publisher$ publisher/dashboard.php [L]
+RewriteRule ^publisher/([^/]+)/?$ publisher/$1.php [L]
+
+# Clean URLs for advertiser panel
+RewriteRule ^advertiser$ advertiser/dashboard.php [L]
+RewriteRule ^advertiser/([^/]+)/?$ advertiser/$1.php [L]
+
+# API endpoints
+RewriteRule ^api/serve/([0-9]+)/?$ api/serve.php?zone=$1 [L,QSA]
+RewriteRule ^api/rtb/([a-zA-Z0-9_-]+)/?$ api/rtb_handler.php?key=$1 [L,QSA]
+
+# Compression
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/plain
+    AddOutputFilterByType DEFLATE text/html
+    AddOutputFilterByType DEFLATE text/xml
+    AddOutputFilterByType DEFLATE text/css
+    AddOutputFilterByType DEFLATE application/xml
+    AddOutputFilterByType DEFLATE application/xhtml+xml
+    AddOutputFilterByType DEFLATE application/rss+xml
+    AddOutputFilterByType DEFLATE application/javascript
+    AddOutputFilterByType DEFLATE application/x-javascript
+    AddOutputFilterByType DEFLATE application/json
+</IfModule>
+
+# Browser Caching
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css "access plus 1 month"
+    ExpiresByType application/javascript "access plus 1 month"
+    ExpiresByType image/png "access plus 1 month"
+    ExpiresByType image/jpg "access plus 1 month"
+    ExpiresByType image/jpeg "access plus 1 month"
+    ExpiresByType image/gif "access plus 1 month"
+    ExpiresByType image/svg+xml "access plus 1 month"
+</IfModule>
+
+# Error Pages
+ErrorDocument 404 /404.php
+ErrorDocument 500 /500.php
+
+# PHP Settings
+php_value upload_max_filesize 10M
+php_value post_max_size 10M
+php_value memory_limit 256M
+php_value max_execution_time 30
