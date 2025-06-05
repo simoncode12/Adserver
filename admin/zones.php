@@ -26,7 +26,7 @@ try {
                     COUNT(CASE WHEN status = 'inactive' THEN 1 END) as inactive_zones,
                     COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_zones,
                     (SELECT COUNT(*) FROM tracking_events te JOIN zones z ON te.zone_id = z.id WHERE DATE(te.created_at) = CURDATE()) as total_impressions_today,
-                    (SELECT SUM(te.revenue) FROM tracking_events te JOIN zones z ON te.zone_id = z.id WHERE DATE(te.created_at) = CURDATE()) as total_revenue_today
+                    (SELECT COALESCE(SUM(te.revenue), 0) FROM tracking_events te JOIN zones z ON te.zone_id = z.id WHERE DATE(te.created_at) = CURDATE()) as total_revenue_today
                  FROM zones"
             );
             
@@ -167,10 +167,10 @@ try {
             "SELECT z.*, s.name as site_name, s.url as site_url, u.username, u.email,
                     af.name as format_name, af.slug as format_slug,
                     (SELECT COUNT(*) FROM tracking_events te WHERE te.zone_id = z.id AND DATE(te.created_at) = CURDATE()) as today_impressions,
-                    (SELECT SUM(te.revenue) FROM tracking_events te WHERE te.zone_id = z.id AND DATE(te.created_at) = CURDATE()) as today_revenue,
+                    (SELECT COALESCE(SUM(te.revenue), 0) FROM tracking_events te WHERE te.zone_id = z.id AND DATE(te.created_at) = CURDATE()) as today_revenue,
                     (SELECT COUNT(*) FROM tracking_events te WHERE te.zone_id = z.id AND te.event_type = 'click' AND DATE(te.created_at) = CURDATE()) as today_clicks,
                     (SELECT COUNT(*) FROM tracking_events te WHERE te.zone_id = z.id AND DATE(te.created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) as week_impressions,
-                    (SELECT SUM(te.revenue) FROM tracking_events te WHERE te.zone_id = z.id AND DATE(te.created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) as week_revenue
+                    (SELECT COALESCE(SUM(te.revenue), 0) FROM tracking_events te WHERE te.zone_id = z.id AND DATE(te.created_at) >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) as week_revenue
              FROM zones z
              JOIN sites s ON z.site_id = s.id
              JOIN users u ON s.user_id = u.id
@@ -393,35 +393,34 @@ include 'templates/header.php';
     </div>
     <div class="card-body">
         <div class="table-responsive">
-            <table class="table table-hover data-table">
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Zone Details</th>
-                        <th>Site & Publisher</th>
-                        <th>Format & Size</th>
-                        <th>Status</th>
-                        <th>Floor Price</th>
-                        <th>Today Stats</th>
-                        <th>Performance</th>
-                        <th>Created</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if (empty($zones)): ?>
+            <?php if (empty($zones)): ?>
+                <div class="text-center py-5">
+                    <i class="fas fa-map-marker-alt fa-4x text-muted mb-3"></i>
+                    <h4 class="text-muted">No Zones Found</h4>
+                    <p class="text-muted mb-4">Create your first zone to get started with ad serving</p>
+                    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createZoneModal">
+                        <i class="fas fa-plus me-2"></i>Create Your First Zone
+                    </button>
+                </div>
+            <?php else: ?>
+                <table class="table table-hover" id="zonesTable">
+                    <thead>
                         <tr>
-                            <td colspan="10" class="text-center py-4">
-                                <div class="text-muted">
-                                    <i class="fas fa-map-marker-alt fa-3x mb-3 opacity-50"></i>
-                                    <p class="mb-0">No zones found</p>
-                                    <small>Create your first zone to get started</small>
-                                </div>
-                            </td>
+                            <th>ID</th>
+                            <th>Zone Details</th>
+                            <th>Site & Publisher</th>
+                            <th class="no-sort">Format & Size</th>
+                            <th>Status</th>
+                            <th>Floor Price</th>
+                            <th class="no-sort">Today Stats</th>
+                            <th class="no-sort">Performance</th>
+                            <th>Created</th>
+                            <th class="no-sort">Actions</th>
                         </tr>
-                    <?php else: ?>
+                    </thead>
+                    <tbody>
                         <?php foreach ($zones as $zone): ?>
-                            <tr>
+                            <tr data-zone-id="<?php echo $zone['id']; ?>">
                                 <td>
                                     <span class="fw-bold"><?php echo $zone['id']; ?></span>
                                 </td>
@@ -516,7 +515,7 @@ include 'templates/header.php';
                                         </button>
                                         <ul class="dropdown-menu">
                                             <li>
-                                                <button class="dropdown-item" onclick="getZoneCode(<?php echo $zone['id']; ?>, '<?php echo htmlspecialchars($zone['name'], ENT_QUOTES); ?>', <?php echo $zone['width']; ?>, <?php echo $zone['height']; ?>)">
+                                                <button class="dropdown-item" onclick="getZoneCode(<?php echo $zone['id']; ?>, <?php echo htmlspecialchars(json_encode($zone['name']), ENT_QUOTES); ?>, <?php echo $zone['width']; ?>, <?php echo $zone['height']; ?>)">
                                                     <i class="fas fa-code me-2 text-primary"></i>Get Implementation Code
                                                 </button>
                                             </li>
@@ -542,7 +541,7 @@ include 'templates/header.php';
                                             <?php endif; ?>
                                             <li><hr class="dropdown-divider"></li>
                                             <li>
-                                                <button class="dropdown-item text-danger" onclick="deleteZone(<?php echo $zone['id']; ?>, '<?php echo htmlspecialchars($zone['name'], ENT_QUOTES); ?>')">
+                                                <button class="dropdown-item text-danger" onclick="deleteZone(<?php echo $zone['id']; ?>, <?php echo htmlspecialchars(json_encode($zone['name']), ENT_QUOTES); ?>)">
                                                     <i class="fas fa-trash me-2"></i>Delete Zone
                                                 </button>
                                             </li>
@@ -551,9 +550,9 @@ include 'templates/header.php';
                                 </td>
                             </tr>
                         <?php endforeach; ?>
-                    <?php endif; ?>
-                </tbody>
-            </table>
+                    </tbody>
+                </table>
+            <?php endif; ?>
         </div>
     </div>
 </div>
@@ -852,7 +851,7 @@ let currentZoneHeight = null;
 
 function updateStatus(zoneId, status) {
     const statusText = status === 'active' ? 'activate' : 'deactivate';
-    if (confirm(`Are you sure you want to ${statusText} this zone?`)) {
+    if (confirm('Are you sure you want to ' + statusText + ' this zone?')) {
         document.getElementById('statusZoneId').value = zoneId;
         document.getElementById('statusValue').value = status;
         document.getElementById('statusForm').submit();
@@ -860,18 +859,18 @@ function updateStatus(zoneId, status) {
 }
 
 function deleteZone(zoneId, zoneName) {
-    if (confirm(`Are you sure you want to delete the zone "${zoneName}"?\n\nThis action cannot be undone and will remove all associated data.`)) {
+    if (confirm('Are you sure you want to delete the zone "' + zoneName + '"?\n\nThis action cannot be undone and will remove all associated data.')) {
         document.getElementById('deleteZoneId').value = zoneId;
         document.getElementById('deleteForm').submit();
     }
 }
 
 function viewZone(zoneId) {
-    window.open(`zone_view.php?id=${zoneId}`, '_blank', 'width=1200,height=800');
+    window.open('zone_view.php?id=' + zoneId, '_blank', 'width=1200,height=800');
 }
 
 function editZone(zoneId) {
-    window.open(`zone_edit.php?id=${zoneId}`, '_blank', 'width=1000,height=700');
+    window.open('zone_edit.php?id=' + zoneId, '_blank', 'width=1000,height=700');
 }
 
 function getZoneCode(zoneId, zoneName, width, height) {
@@ -880,69 +879,90 @@ function getZoneCode(zoneId, zoneName, width, height) {
     currentZoneHeight = height;
     
     // Set zone name in modal title
-    document.getElementById('zoneCodeTitle').textContent = `- ${zoneName}`;
+    const titleElement = document.getElementById('zoneCodeTitle');
+    if (titleElement) {
+        titleElement.textContent = '- ' + zoneName;
+    }
     
     // Base URL for ad serving
-    const baseUrl = '<?php echo rtrim(AD_SERVER_URL, '/'); ?>';
+    const baseUrl = <?php echo json_encode(rtrim(AD_SERVER_URL, '/')); ?>;
     
     // Generate different implementation codes
-    const jsCode = `<script src="${baseUrl}/api/serve/${zoneId}"></script>`;
+    const jsCode = '<script src="' + baseUrl + '/api/serve/' + zoneId + '"><\/script>';
     
-    const asyncCode = `<!-- AdStart Zone: ${zoneName} (${width}x${height}) -->
-<div id="adstart-zone-${zoneId}" style="width:${width}px;height:${height}px;"></div>
-<script>
-(function() {
-    var adContainer = document.getElementById('adstart-zone-${zoneId}');
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', '${baseUrl}/api/serve/${zoneId}?format=json&cb=' + Date.now(), true);
-    xhr.onreadystatechange = function() {
-        if (xhr.readyState === 4 && xhr.status === 200) {
-            try {
-                var response = JSON.parse(xhr.responseText);
-                if (response.html) {
-                    adContainer.innerHTML = response.html;
-                } else if (response.script) {
-                    var script = document.createElement('script');
-                    script.innerHTML = response.script;
-                    adContainer.appendChild(script);
-                } else {
-                    adContainer.innerHTML = response.fallback || '';
-                }
-            } catch (e) {
-                console.error('AdStart: Error loading zone ${zoneId}:', e);
-            }
-        }
-    };
-    xhr.send();
-})();
-</script>`;
+    const asyncCode = '<!-- AdStart Zone: ' + zoneName + ' (' + width + 'x' + height + ') -->\n' +
+        '<div id="adstart-zone-' + zoneId + '" style="width:' + width + 'px;height:' + height + 'px;"></div>\n' +
+        '<script>\n' +
+        '(function() {\n' +
+        '    var adContainer = document.getElementById(\'adstart-zone-' + zoneId + '\');\n' +
+        '    if (!adContainer) return;\n' +
+        '    \n' +
+        '    var xhr = new XMLHttpRequest();\n' +
+        '    xhr.open(\'GET\', \'' + baseUrl + '/api/serve/' + zoneId + '?format=json&cb=\' + Date.now(), true);\n' +
+        '    xhr.onreadystatechange = function() {\n' +
+        '        if (xhr.readyState === 4 && xhr.status === 200) {\n' +
+        '            try {\n' +
+        '                var response = JSON.parse(xhr.responseText);\n' +
+        '                if (response && response.html) {\n' +
+        '                    adContainer.innerHTML = response.html;\n' +
+        '                } else if (response && response.script) {\n' +
+        '                    var script = document.createElement(\'script\');\n' +
+        '                    script.innerHTML = response.script;\n' +
+        '                    adContainer.appendChild(script);\n' +
+        '                } else {\n' +
+        '                    adContainer.innerHTML = response.fallback || \'\';\n' +
+        '                }\n' +
+        '            } catch (e) {\n' +
+        '                console.error(\'AdStart: Error loading zone ' + zoneId + ':\', e);\n' +
+        '                adContainer.innerHTML = \'<p>Ad loading error</p>\';\n' +
+        '            }\n' +
+        '        } else if (xhr.readyState === 4) {\n' +
+        '            console.error(\'AdStart: HTTP error\', xhr.status);\n' +
+        '            adContainer.innerHTML = \'<p>Ad server unavailable</p>\';\n' +
+        '        }\n' +
+        '    };\n' +
+        '    xhr.send();\n' +
+        '})();\n' +
+        '<\/script>';
 
-    const iframeCode = `<!-- AdStart iFrame: ${zoneName} (${width}x${height}) -->
-<iframe src="${baseUrl}/api/serve/${zoneId}?format=iframe&cb=${Date.now()}" 
-        width="${width}" 
-        height="${height}" 
-        frameborder="0" 
-        scrolling="no"
-        style="border: none; overflow: hidden;"
-        title="AdStart Zone ${zoneId}">
-    <!-- Fallback content for browsers that don't support iframes -->
-    <p>Your browser doesn't support iframes. <a href="${baseUrl}/api/serve/${zoneId}" target="_blank">View ads</a></p>
-</iframe>`;
+    const iframeCode = '<!-- AdStart iFrame: ' + zoneName + ' (' + width + 'x' + height + ') -->\n' +
+        '<iframe src="' + baseUrl + '/api/serve/' + zoneId + '?format=iframe&cb=' + Date.now() + '" \n' +
+        '        width="' + width + '" \n' +
+        '        height="' + height + '" \n' +
+        '        frameborder="0" \n' +
+        '        scrolling="no"\n' +
+        '        style="border: none; overflow: hidden;"\n' +
+        '        title="AdStart Zone ' + zoneId + '">\n' +
+        '    <p>Your browser doesn\'t support iframes. <a href="' + baseUrl + '/api/serve/' + zoneId + '" target="_blank">View ads</a></p>\n' +
+        '</iframe>';
 
-    const apiUrl = `${baseUrl}/api/serve/${zoneId}`;
+    const apiUrl = baseUrl + '/api/serve/' + zoneId;
     
-    // Populate modal fields
-    document.getElementById('jsCode').value = jsCode;
-    document.getElementById('asyncCode').value = asyncCode;
-    document.getElementById('iframeCode').value = iframeCode;
-    document.getElementById('apiUrl').value = apiUrl;
+    // Safely populate modal fields
+    const jsCodeElement = document.getElementById('jsCode');
+    const asyncCodeElement = document.getElementById('asyncCode');
+    const iframeCodeElement = document.getElementById('iframeCode');
+    const apiUrlElement = document.getElementById('apiUrl');
+    
+    if (jsCodeElement) jsCodeElement.value = jsCode;
+    if (asyncCodeElement) asyncCodeElement.value = asyncCode;
+    if (iframeCodeElement) iframeCodeElement.value = iframeCode;
+    if (apiUrlElement) apiUrlElement.value = apiUrl;
     
     // Show modal
-    new bootstrap.Modal(document.getElementById('zoneCodeModal')).show();
+    const modal = document.getElementById('zoneCodeModal');
+    if (modal) {
+        new bootstrap.Modal(modal).show();
+    }
 }
 
 function copyCode(elementId) {
     const element = document.getElementById(elementId);
+    if (!element) {
+        showError('Element not found');
+        return;
+    }
+    
     element.select();
     element.setSelectionRange(0, 99999);
     
@@ -961,8 +981,12 @@ function copyCode(elementId) {
 
 function fallbackCopy(element) {
     try {
-        document.execCommand('copy');
-        showSuccess('Code copied to clipboard!');
+        const successful = document.execCommand('copy');
+        if (successful) {
+            showSuccess('Code copied to clipboard!');
+        } else {
+            showError('Failed to copy code. Please copy manually.');
+        }
     } catch (err) {
         console.error('Fallback copy failed:', err);
         showError('Failed to copy code. Please copy manually.');
@@ -971,61 +995,105 @@ function fallbackCopy(element) {
 
 function testZone() {
     if (currentZoneId) {
-        const baseUrl = '<?php echo rtrim(AD_SERVER_URL, '/'); ?>';
-        const testUrl = `${baseUrl}/api/serve/${currentZoneId}?format=html&test=1&cb=${Date.now()}`;
-        window.open(testUrl, `test-zone-${currentZoneId}`, 'width=800,height=600,scrollbars=yes');
+        const baseUrl = <?php echo json_encode(rtrim(AD_SERVER_URL, '/')); ?>;
+        const testUrl = baseUrl + '/api/serve/' + currentZoneId + '?format=html&test=1&cb=' + Date.now();
+        window.open(testUrl, 'test-zone-' + currentZoneId, 'width=800,height=600,scrollbars=yes');
+    } else {
+        showError('No zone selected for testing');
     }
 }
 
-// Auto-populate banner sizes when format is selected
+// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', function() {
-    const formatSelect = document.getElementById('ad_format_id');
-    if (formatSelect) {
-        formatSelect.addEventListener('change', function() {
-            const selectedOption = this.options[this.selectedIndex];
-            const width = selectedOption.getAttribute('data-width');
-            const height = selectedOption.getAttribute('data-height');
-            
-            if (width && height) {
-                document.getElementById('width').value = width;
-                document.getElementById('height').value = height;
-            }
-        });
-    }
-    
-    // Form validation
-    const createForm = document.getElementById('createZoneForm');
-    if (createForm) {
-        createForm.addEventListener('submit', function(e) {
-            const name = document.getElementById('name').value.trim();
-            const width = parseInt(document.getElementById('width').value);
-            const height = parseInt(document.getElementById('height').value);
-            
-            if (name.length < 3) {
-                e.preventDefault();
-                showError('Zone name must be at least 3 characters long');
-                return;
-            }
-            
-            if (width < 1 || width > 2000 || height < 1 || height > 2000) {
-                e.preventDefault();
-                showError('Width and height must be between 1 and 2000 pixels');
-                return;
-            }
-        });
+    try {
+        // Auto-populate banner sizes when format is selected
+        const formatSelect = document.getElementById('ad_format_id');
+        if (formatSelect) {
+            formatSelect.addEventListener('change', function() {
+                const selectedOption = this.options[this.selectedIndex];
+                const width = selectedOption.getAttribute('data-width');
+                const height = selectedOption.getAttribute('data-height');
+                
+                const widthInput = document.getElementById('width');
+                const heightInput = document.getElementById('height');
+                
+                if (width && height && widthInput && heightInput) {
+                    widthInput.value = width;
+                    heightInput.value = height;
+                }
+            });
+        }
+        
+        // Form validation
+        const createForm = document.getElementById('createZoneForm');
+        if (createForm) {
+            createForm.addEventListener('submit', function(e) {
+                const nameInput = document.getElementById('name');
+                const widthInput = document.getElementById('width');
+                const heightInput = document.getElementById('height');
+                
+                if (!nameInput || !widthInput || !heightInput) {
+                    e.preventDefault();
+                    showError('Required form fields not found');
+                    return;
+                }
+                
+                const name = nameInput.value.trim();
+                const width = parseInt(widthInput.value);
+                const height = parseInt(heightInput.value);
+                
+                if (name.length < 3) {
+                    e.preventDefault();
+                    showError('Zone name must be at least 3 characters long');
+                    nameInput.focus();
+                    return;
+                }
+                
+                if (isNaN(width) || width < 1 || width > 2000) {
+                    e.preventDefault();
+                    showError('Width must be between 1 and 2000 pixels');
+                    widthInput.focus();
+                    return;
+                }
+                
+                if (isNaN(height) || height < 1 || height > 2000) {
+                    e.preventDefault();
+                    showError('Height must be between 1 and 2000 pixels');
+                    heightInput.focus();
+                    return;
+                }
+            });
+        }
+        
+    } catch (error) {
+        console.error('DOM ready initialization error:', error);
     }
 });
 
-// Real-time stats update
+// Real-time stats update with proper error handling
 function updateLiveStats() {
-    fetch(window.location.href + (window.location.href.includes('?') ? '&' : '?') + 'ajax=1')
-        .then(response => response.json())
+    const currentUrl = window.location.href;
+    const separator = currentUrl.includes('?') ? '&' : '?';
+    const ajaxUrl = currentUrl + separator + 'ajax=1';
+    
+    fetch(ajaxUrl)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('HTTP error! status: ' + response.status);
+            }
+            return response.json();
+        })
         .then(data => {
             if (data.success && data.stats) {
-                document.getElementById('total-zones').textContent = parseInt(data.stats.total_zones).toLocaleString();
-                document.getElementById('active-zones').textContent = parseInt(data.stats.active_zones).toLocaleString();
-                document.getElementById('today-impressions').textContent = parseInt(data.stats.total_impressions_today).toLocaleString();
-                document.getElementById('today-revenue').textContent = '$' + parseFloat(data.stats.total_revenue_today).toFixed(2);
+                const totalZones = document.getElementById('total-zones');
+                const activeZones = document.getElementById('active-zones');
+                const todayImpressions = document.getElementById('today-impressions');
+                const todayRevenue = document.getElementById('today-revenue');
+                
+                if (totalZones) totalZones.textContent = parseInt(data.stats.total_zones || 0).toLocaleString();
+                if (activeZones) activeZones.textContent = parseInt(data.stats.active_zones || 0).toLocaleString();
+                if (todayImpressions) todayImpressions.textContent = parseInt(data.stats.total_impressions_today || 0).toLocaleString();
+                if (todayRevenue) todayRevenue.textContent = '$' + parseFloat(data.stats.total_revenue_today || 0).toFixed(2);
             }
         })
         .catch(error => {
@@ -1033,29 +1101,39 @@ function updateLiveStats() {
         });
 }
 
-// Update stats every 30 seconds
-setInterval(updateLiveStats, 30000);
-
-// Common banner size shortcuts
-const commonSizes = {
-    'leaderboard': {width: 728, height: 90},
-    'medium-rectangle': {width: 300, height: 250},
-    'mobile-banner': {width: 320, height: 50},
-    'wide-skyscraper': {width: 160, height: 600},
-    'half-page': {width: 300, height: 600},
-    'large-billboard': {width: 970, height: 250},
-    'mobile-interstitial': {width: 320, height: 480},
-    'banner': {width: 468, height: 60},
-    'square': {width: 250, height: 250},
-    'small-rectangle': {width: 200, height: 200}
-};
-
-function setSizeQuickly(sizeKey) {
-    if (commonSizes[sizeKey]) {
-        document.getElementById('width').value = commonSizes[sizeKey].width;
-        document.getElementById('height').value = commonSizes[sizeKey].height;
-    }
+// Update stats every 30 seconds, but only if page is visible
+let statsInterval;
+function startStatsUpdate() {
+    if (statsInterval) clearInterval(statsInterval);
+    statsInterval = setInterval(function() {
+        if (!document.hidden) {
+            updateLiveStats();
+        }
+    }, 30000);
 }
+
+// Start stats updates
+startStatsUpdate();
+
+// Handle page visibility changes
+document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+        if (statsInterval) clearInterval(statsInterval);
+    } else {
+        startStatsUpdate();
+        updateLiveStats();
+    }
+});
+
+// Global error handling
+window.addEventListener('error', function(e) {
+    console.error('Global error:', e.error);
+    return false;
+});
+
+window.addEventListener('unhandledrejection', function(e) {
+    console.error('Unhandled promise rejection:', e.reason);
+});
 </script>
 
 <?php include 'templates/footer.php'; ?>
