@@ -5,9 +5,9 @@
  */
 
 define('DB_HOST', 'localhost');
-define('DB_USER', 'user_ad');
+define('DB_USER', 'user_up');
 define('DB_PASS', 'Puputchen12$');
-define('DB_NAME', 'user_ad');
+define('DB_NAME', 'user_up');
 define('DB_CHARSET', 'utf8mb4');
 
 class Database {
