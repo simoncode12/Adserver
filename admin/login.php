@@ -9,7 +9,7 @@ $auth = new Auth();
 
 // Redirect if already logged in
 if ($auth->isAuthenticated(USER_TYPE_ADMIN)) {
-    redirect('index.php');
+    redirect('dashboard.php');
 }
 
 $error = '';
@@ -28,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $result = $auth->login($email, $password, USER_TYPE_ADMIN);
         
         if ($result['success']) {
-            redirect('index.php');
+            redirect('dashboard.php');
         } else {
             $error = $result['message'];
         }
