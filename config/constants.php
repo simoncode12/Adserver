@@ -78,6 +78,23 @@ define('RTB_STATUS_TIMEOUT', 'timeout');
 define('RTB_STATUS_ERROR', 'error');
 define('RTB_STATUS_NO_BID', 'no_bid');
 
+// Campaign types for RTB/RON
+define('CAMPAIGN_TYPE_RTB', 'rtb');
+define('CAMPAIGN_TYPE_RON', 'ron');
+
+// Zone types
+define('ZONE_TYPE_BANNER', 'banner');
+define('ZONE_TYPE_POPUP', 'popup');
+define('ZONE_TYPE_NATIVE', 'native');
+
+// Revenue share defaults
+define('DEFAULT_REVENUE_SHARE', 50.00);
+
+// Exoclick integration
+define('EXOCLICK_RTB_BASE_URL', 'http://rtb.exoclick.com/rtb.php');
+define('EXOCLICK_DEFAULT_ZONE', '5128252');
+define('EXOCLICK_DEFAULT_FID', 'e573a1c2a656509b0112f7213359757be76929c7');
+
 // Fraud types
 define('FRAUD_TYPE_BOT', 'bot');
 define('FRAUD_TYPE_VPN', 'vpn');
